@@ -28,6 +28,7 @@ interface Receipt {
     email: string;
   };
   parsedJson: any;
+  manualEditsJson?: any;
   createdAt: string;
 }
 
@@ -150,10 +151,86 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
   const [photoZoom, setPhotoZoom] = useState(1);
   const [photoTagInput, setPhotoTagInput] = useState('');
   const [photoUpdateError, setPhotoUpdateError] = useState('');
+  const [receiptAssignments, setReceiptAssignments] = useState<Record<string, string[]>>({});
+  const [photoAssignments, setPhotoAssignments] = useState<Record<string, string[]>>({});
 
   const groupsStorageKey = useMemo(
     () => (tripId ? `trip-groups-${tripId}` : null),
     [tripId]
+  );
+
+  const receiptAssignmentsStorageKey = useMemo(
+    () => (tripId ? `trip-${tripId}-receipt-households` : null),
+    [tripId]
+  );
+
+  const photoAssignmentsStorageKey = useMemo(
+    () => (tripId ? `trip-${tripId}-photo-households` : null),
+    [tripId]
+  );
+
+  const currencyFormatter = useMemo(() => {
+    const currency = trip?.currency || 'USD';
+    try {
+      return new Intl.NumberFormat(undefined, {
+        style: 'currency',
+        currency,
+      });
+    } catch (error) {
+      console.warn('Falling back to USD currency formatter', error);
+      return new Intl.NumberFormat(undefined, {
+        style: 'currency',
+        currency: 'USD',
+      });
+    }
+  }, [trip?.currency]);
+
+  const formatCurrency = useCallback(
+    (value: number) => {
+      if (!Number.isFinite(value)) {
+        return Number.isNaN(value) ? '—' : value.toString();
+      }
+      return currencyFormatter.format(value);
+    },
+    [currencyFormatter]
+  );
+
+  const extractNumericValue = useCallback((input: unknown): number | null => {
+    if (typeof input === 'number' && Number.isFinite(input)) {
+      return input;
+    }
+    if (typeof input === 'string') {
+      const cleaned = input.replace(/[^0-9.\-]/g, '');
+      const parsed = parseFloat(cleaned);
+      if (Number.isFinite(parsed)) {
+        return parsed;
+      }
+    }
+    return null;
+  }, []);
+
+  const getReceiptAmount = useCallback(
+    (receipt: Receipt): number => {
+      const manual = receipt.manualEditsJson as Record<string, unknown> | undefined;
+      const parsed = receipt.parsedJson as Record<string, unknown> | undefined;
+      const candidates = [
+        manual?.total,
+        manual?.amount,
+        parsed?.total,
+        parsed?.amount,
+        parsed?.grandTotal,
+      ];
+
+      for (const candidate of candidates) {
+        const value = extractNumericValue(candidate);
+        if (value !== null) {
+          return value;
+        }
+      }
+
+      return 0;
+    },
+    [extractNumericValue]
   );
 
   const persistGroups = useCallback(
@@ -233,6 +310,180 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
       return nextGroups;
     });
   }, [participants, persistGroups]);
+
+  useEffect(() => {
+    if (!receiptAssignmentsStorageKey) {
+      setReceiptAssignments({});
+      return;
+    }
+
+    try {
+      const stored = localStorage.getItem(receiptAssignmentsStorageKey);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed && typeof parsed === 'object') {
+          setReceiptAssignments(parsed as Record<string, string[]>);
+        } else {
+          setReceiptAssignments({});
+        }
+      } else {
+        setReceiptAssignments({});
+      }
+    } catch (error) {
+      console.warn('Failed to parse stored receipt households', error);
+      setReceiptAssignments({});
+    }
+  }, [receiptAssignmentsStorageKey]);
+
+  useEffect(() => {
+    if (!photoAssignmentsStorageKey) {
+      setPhotoAssignments({});
+      return;
+    }
+
+    try {
+      const stored = localStorage.getItem(photoAssignmentsStorageKey);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (parsed && typeof parsed === 'object') {
+          setPhotoAssignments(parsed as Record<string, string[]>);
+        } else {
+          setPhotoAssignments({});
+        }
+      } else {
+        setPhotoAssignments({});
+      }
+    } catch (error) {
+      console.warn('Failed to parse stored photo households', error);
+      setPhotoAssignments({});
+    }
+  }, [photoAssignmentsStorageKey]);
+
+  useEffect(() => {
+    if (receiptAssignmentsStorageKey) {
+      localStorage.setItem(
+        receiptAssignmentsStorageKey,
+        JSON.stringify(receiptAssignments)
+      );
+    }
+  }, [receiptAssignments, receiptAssignmentsStorageKey]);
+
+  useEffect(() => {
+    if (photoAssignmentsStorageKey) {
+      localStorage.setItem(
+        photoAssignmentsStorageKey,
+        JSON.stringify(photoAssignments)
+      );
+    }
+  }, [photoAssignments, photoAssignmentsStorageKey]);
+
+  useEffect(() => {
+    if (participants.length === 0) {
+      if (Object.keys(receiptAssignments).length > 0) {
+        setReceiptAssignments({});
+      }
+      if (Object.keys(photoAssignments).length > 0) {
+        setPhotoAssignments({});
+      }
+      return;
+    }
+
+    const validHouseholds = new Set(participants.map(participant => participant.householdId));
+
+    setReceiptAssignments(prev => {
+      let changed = false;
+      const next: Record<string, string[]> = {};
+
+      Object.entries(prev).forEach(([receiptId, householdIds]) => {
+        const filtered = householdIds.filter(id => validHouseholds.has(id));
+        if (filtered.length !== householdIds.length) {
+          changed = true;
+        }
+        if (filtered.length > 0) {
+          next[receiptId] = filtered;
+        } else if (householdIds.length > 0) {
+          changed = true;
+        }
+      });
+
+      return changed ? next : prev;
+    });
+
+    setPhotoAssignments(prev => {
+      let changed = false;
+      const next: Record<string, string[]> = {};
+
+      Object.entries(prev).forEach(([photoId, householdIds]) => {
+        const filtered = householdIds.filter(id => validHouseholds.has(id));
+        if (filtered.length !== householdIds.length) {
+          changed = true;
+        }
+        if (filtered.length > 0) {
+          next[photoId] = filtered;
+        } else if (householdIds.length > 0) {
+          changed = true;
+        }
+      });
+
+      return changed ? next : prev;
+    });
+  }, [participants, photoAssignments, receiptAssignments]);
+
+  useEffect(() => {
+    if (receipts.length === 0) {
+      setReceiptAssignments({});
+      return;
+    }
+
+    const validReceipts = new Set(receipts.map(receipt => receipt.id));
+
+    setReceiptAssignments(prev => {
+      let changed = false;
+      const next: Record<string, string[]> = {};
+
+      Object.entries(prev).forEach(([receiptId, householdIds]) => {
+        if (!validReceipts.has(receiptId)) {
+          changed = true;
+          return;
+        }
+        next[receiptId] = householdIds;
+      });
+
+      if (!changed && Object.keys(next).length === Object.keys(prev).length) {
+        return prev;
+      }
+
+      return next;
+    });
+  }, [receipts]);
+
+  useEffect(() => {
+    if (photos.length === 0) {
+      setPhotoAssignments({});
+      return;
+    }
+
+    const validPhotos = new Set(photos.map(photo => photo.id));
+
+    setPhotoAssignments(prev => {
+      let changed = false;
+      const next: Record<string, string[]> = {};
+
+      Object.entries(prev).forEach(([photoId, householdIds]) => {
+        if (!validPhotos.has(photoId)) {
+          changed = true;
+          return;
+        }
+        next[photoId] = householdIds;
+      });
+
+      if (!changed && Object.keys(next).length === Object.keys(prev).length) {
+        return prev;
+      }
+
+      return next;
+    });
+  }, [photos]);
 
   useEffect(() => {
     const userData = localStorage.getItem('user');
@@ -517,8 +768,20 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
     return map;
   }, [participants]);
 
+  const sortedParticipants = useMemo(
+    () =>
+      [...participants].sort((a, b) =>
+        a.household.displayName.localeCompare(
+          b.household.displayName,
+          undefined,
+          { sensitivity: 'base' }
+        )
+      ),
+    [participants]
+  );
+
   const handleCreateGroup = () => {
-    const name = prompt('输入新的分组名称');
+    const name = prompt('输入新的家庭名称');
     if (!name) return;
 
     setGroups(prev => {
@@ -534,7 +797,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
   const handleRenameGroup = (groupId: string) => {
     const group = groups.find(g => g.id === groupId);
     if (!group) return;
-    const name = prompt('更新分组名称', group.name);
+    const name = prompt('更新家庭名称', group.name);
     if (!name) return;
 
     setGroups(prev => {
@@ -550,7 +813,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
 
   const handleDeleteGroup = (groupId: string) => {
     if (groupId === 'group-ungrouped') return;
-    if (!confirm('确认删除这个分组？成员会移动到未分组。')) return;
+    if (!confirm('确认删除这个家庭？成员会移动到未分组。')) return;
 
     setGroups(prev => {
       const groupToDelete = prev.find(group => group.id === groupId);
@@ -614,6 +877,109 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
   ) => {
     event.dataTransfer.setData('text/plain', householdId);
   };
+
+  const toggleReceiptHousehold = useCallback(
+    (receiptId: string, householdId: string) => {
+      setReceiptAssignments(prev => {
+        const current = prev[receiptId] ?? [];
+        const exists = current.includes(householdId);
+        const nextSelections = exists
+          ? current.filter(id => id !== householdId)
+          : [...current, householdId];
+        const next = { ...prev };
+        if (nextSelections.length > 0) {
+          next[receiptId] = nextSelections;
+        } else {
+          delete next[receiptId];
+        }
+        return next;
+      });
+    },
+    []
+  );
+
+  const togglePhotoHousehold = useCallback(
+    (photoId: string, householdId: string) => {
+      setPhotoAssignments(prev => {
+        const current = prev[photoId] ?? [];
+        const exists = current.includes(householdId);
+        const nextSelections = exists
+          ? current.filter(id => id !== householdId)
+          : [...current, householdId];
+        const next = { ...prev };
+        if (nextSelections.length > 0) {
+          next[photoId] = nextSelections;
+        } else {
+          delete next[photoId];
+        }
+        return next;
+      });
+    },
+    []
+  );
+
+  const weightedAllocation = useMemo(() => {
+    const allocation = new Map<
+      string,
+      {
+        amount: number;
+        name: string;
+      }
+    >();
+    let total = 0;
+
+    receipts.forEach(receipt => {
+      const selected = receiptAssignments[receipt.id];
+      if (!selected || selected.length === 0) {
+        return;
+      }
+
+      const amount = getReceiptAmount(receipt);
+      if (!Number.isFinite(amount) || amount <= 0) {
+        return;
+      }
+
+      const participatingHouseholds = selected
+        .map(id => householdMap.get(id))
+        .filter(
+          (participant): participant is Participant =>
+            Boolean(participant) && participant.weight > 0
+        );
+
+      if (participatingHouseholds.length === 0) {
+        return;
+      }
+
+      const totalWeight = participatingHouseholds.reduce(
+        (sum, participant) => sum + participant.weight,
+        0
+      );
+
+      if (totalWeight <= 0) {
+        return;
+      }
+
+      total += amount;
+
+      participatingHouseholds.forEach(participant => {
+        const share = (amount * participant.weight) / totalWeight;
+        const existing = allocation.get(participant.householdId) || {
+          amount: 0,
+          name: participant.household.displayName,
+        };
+        existing.amount += share;
+        allocation.set(participant.householdId, existing);
+      });
+    });
+
+    return {
+      total,
+      entries: Array.from(allocation.entries()).map(([householdId, data]) => ({
+        householdId,
+        ...data,
+      })),
+    };
+  }, [getReceiptAmount, householdMap, receiptAssignments, receipts]);
 
   useEffect(() => {
     if (photos.length === 0) {
@@ -1116,7 +1482,9 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                           <p className="text-sm font-medium text-gray-900 dark:text-white">
                             {t('trip.receipts.parsed.amount', {
                               amount:
-                                receipt.parsedJson.amount ?? t('trip.receipts.parsed.noAmount'),
+                                receipt.parsedJson.total ??
+                                receipt.parsedJson.amount ??
+                                t('trip.receipts.parsed.noAmount'),
                             })}
                           </p>
                           <p className="text-xs text-gray-600 dark:text-gray-400">
@@ -1124,6 +1492,119 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                           </p>
                         </div>
                       )}
+                      <div className="mt-4 rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-900/50">
+                        <div>
+                          <h4 className="text-sm font-semibold text-gray-900 dark:text-white">
+                            {t('trip.receipts.attendanceTitle')}
+                          </h4>
+                          <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+                            {t('trip.receipts.attendanceHint')}
+                          </p>
+                        </div>
+                        {sortedParticipants.length === 0 ? (
+                          <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+                            {t('trip.receipts.attendanceEmpty')}
+                          </p>
+                        ) : (
+                          <div className="mt-3 max-h-40 space-y-2 overflow-y-auto pr-1">
+                            {sortedParticipants.map(participant => {
+                              const isChecked = (receiptAssignments[receipt.id] ?? []).includes(
+                                participant.householdId
+                              );
+                              return (
+                                <label
+                                  key={`${receipt.id}-${participant.householdId}`}
+                                  className="flex items-center gap-2 rounded-md px-2 py-1 text-sm text-gray-700 transition hover:bg-white dark:text-gray-200 dark:hover:bg-gray-800"
+                                  onClick={event => event.stopPropagation()}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={isChecked}
+                                    onChange={event => {
+                                      event.stopPropagation();
+                                      toggleReceiptHousehold(
+                                        receipt.id,
+                                        participant.householdId
+                                      );
+                                    }}
+                                    className="h-4 w-4 accent-blue-600"
+                                  />
+                                  <span className="flex-1">
+                                    {participant.household.displayName}
+                                  </span>
+                                  <span className="text-xs text-gray-500 dark:text-gray-400">
+                                    {t('trip.participants.weight', {
+                                      weight: participant.weight.toFixed(1),
+                                    })}
+                                  </span>
+                                </label>
+                              );
+                            })}
+                          </div>
+                        )}
+                        {(() => {
+                          const assignedHouseholds = receiptAssignments[receipt.id] ?? [];
+                          if (assignedHouseholds.length === 0) {
+                            return null;
+                          }
+                          const participatingHouseholds = assignedHouseholds
+                            .map(id => householdMap.get(id))
+                            .filter(
+                              (participant): participant is Participant => Boolean(participant)
+                            );
+                          if (participatingHouseholds.length === 0) {
+                            return null;
+                          }
+                          const totalWeight = participatingHouseholds.reduce(
+                            (sum, participant) => sum + Math.max(participant.weight, 0),
+                            0
+                          );
+                          if (totalWeight <= 0) {
+                            return (
+                              <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-400/50 dark:bg-amber-500/10 dark:text-amber-200">
+                                {t('trip.receipts.attendanceMissingWeight')}
+                              </div>
+                            );
+                          }
+                          const amount = getReceiptAmount(receipt);
+                          if (!Number.isFinite(amount) || amount <= 0) {
+                            return (
+                              <div className="mt-3 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700 dark:border-blue-400/50 dark:bg-blue-500/10 dark:text-blue-200">
+                                {t('trip.receipts.attendanceNoAmount')}
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="mt-3 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs text-gray-700 shadow-sm dark:border-gray-700 dark:bg-gray-800 dark:text-gray-200">
+                              <p className="font-medium">
+                                {t('trip.receipts.attendanceTotal', {
+                                  amount: formatCurrency(amount),
+                                  weight: totalWeight.toFixed(1),
+                                })}
+                              </p>
+                              <ul className="mt-2 space-y-1">
+                                {participatingHouseholds.map(participant => {
+                                  const share = (amount * participant.weight) / totalWeight;
+                                  return (
+                                    <li
+                                      key={`${receipt.id}-share-${participant.householdId}`}
+                                      className="flex items-center justify-between gap-3"
+                                    >
+                                      <span>{participant.household.displayName}</span>
+                                      <span>
+                                        {t('trip.receipts.attendanceShare', {
+                                          amount: formatCurrency(share),
+                                          weight: participant.weight.toFixed(1),
+                                        })}
+                                      </span>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            </div>
+                          );
+                        })()}
+                      </div>
                     </div>
                   </div>
                 ))}
@@ -1204,6 +1685,66 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                   </button>
                 )}
               </div>
+            </div>
+
+            <div className="rounded-2xl border border-dashed border-gray-300 bg-white shadow-sm dark:border-gray-700 dark:bg-gray-800">
+              <div className="border-b border-gray-200 px-6 py-4 dark:border-gray-700">
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                  {t('trip.settlements.weightedSummaryTitle')}
+                </h3>
+                <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
+                  {t('trip.settlements.weightedSummaryDescription')}
+                </p>
+              </div>
+              {weightedAllocation.entries.length === 0 ? (
+                <div className="px-6 py-4 text-sm text-gray-600 dark:text-gray-400">
+                  {t('trip.settlements.weightedSummaryEmpty')}
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead className="bg-gray-50 dark:bg-gray-700">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-300">
+                          {t('trip.settlements.weightedSummaryHousehold')}
+                        </th>
+                        <th className="px-6 py-3 text-right text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-300">
+                          {t('trip.settlements.weightedSummaryAmount')}
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-700 dark:bg-gray-800">
+                      {weightedAllocation.entries.map(entry => (
+                        <tr key={entry.householdId}>
+                          <td className="px-6 py-3 text-sm text-gray-900 dark:text-white">
+                            {entry.name}
+                          </td>
+                          <td className="px-6 py-3 text-right text-sm font-medium text-gray-900 dark:text-white">
+                            {formatCurrency(entry.amount)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {weightedAllocation.entries.length > 0 && (
+                <div className="border-t border-gray-200 px-6 py-4 dark:border-gray-700">
+                  <p className="text-sm font-semibold text-gray-900 dark:text-white">
+                    {t('trip.settlements.weightedSummaryTotal', {
+                      amount: formatCurrency(
+                        weightedAllocation.entries.reduce(
+                          (sum, entry) => sum + entry.amount,
+                          0
+                        )
+                      ),
+                    })}
+                  </p>
+                  <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+                    {t('trip.settlements.weightedSummaryDisclaimer')}
+                  </p>
+                </div>
+              )}
             </div>
 
             {displaySettlement ? (
@@ -1579,6 +2120,47 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                             ))
                           ) : (
                             <span className="text-gray-400">{t('trip.photos.noTags')}</span>
+                          )}
+                        </div>
+                        <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-900/50">
+                          <p className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400">
+                            {t('trip.photos.householdTitle')}
+                          </p>
+                          <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
+                            {t('trip.photos.householdHint')}
+                          </p>
+                          {sortedParticipants.length === 0 ? (
+                            <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
+                              {t('trip.photos.householdEmpty')}
+                            </p>
+                          ) : (
+                            <div className="mt-2 max-h-28 space-y-1 overflow-y-auto pr-1">
+                              {sortedParticipants.map(participant => {
+                                const isTagged = (photoAssignments[photo.id] ?? []).includes(
+                                  participant.householdId
+                                );
+                                return (
+                                  <label
+                                    key={`${photo.id}-household-${participant.householdId}`}
+                                    className="flex items-center gap-2 rounded-md px-2 py-1 text-xs text-gray-700 transition hover:bg-white dark:text-gray-200 dark:hover:bg-gray-800"
+                                    onClick={event => event.stopPropagation()}
+                                  >
+                                    <input
+                                      type="checkbox"
+                                      checked={isTagged}
+                                      onChange={event => {
+                                        event.stopPropagation();
+                                        togglePhotoHousehold(photo.id, participant.householdId);
+                                      }}
+                                      className="h-3.5 w-3.5 accent-blue-600"
+                                    />
+                                    <span className="flex-1">
+                                      {participant.household.displayName}
+                                    </span>
+                                  </label>
+                                );
+                              })}
+                            </div>
                           )}
                         </div>
                         <button
