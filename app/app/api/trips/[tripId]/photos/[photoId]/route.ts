@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
+import { deleteFile } from '@/lib/storage';
 import { z } from 'zod';
 
 const updatePhotoSchema = z.object({
@@ -59,6 +60,44 @@ export async function PATCH(
     console.error('Failed to update photo metadata:', error);
     return NextResponse.json(
       { error: 'Failed to update photo metadata' },
+      { status: 500 }
+    );
+  }
+}
+
+export async function DELETE(
+  _request: NextRequest,
+  { params }: { params: Promise<{ tripId: string; photoId: string }> }
+) {
+  try {
+    const { tripId, photoId } = await params;
+
+    const photo = await prisma.photo.findFirst({
+      where: {
+        id: photoId,
+        tripId,
+      },
+    });
+
+    if (!photo) {
+      return NextResponse.json({ error: 'Photo not found' }, { status: 404 });
+    }
+
+    await prisma.photo.delete({
+      where: { id: photoId },
+    });
+
+    await Promise.all(
+      [photo.filePath, photo.thumbPath]
+        .filter((path): path is string => Boolean(path))
+        .map(path => deleteFile(path))
+    );
+
+    return NextResponse.json({ success: true });
+  } catch (error) {
+    console.error('Failed to delete photo:', error);
+    return NextResponse.json(
+      { error: 'Failed to delete photo' },
       { status: 500 }
     );
   }

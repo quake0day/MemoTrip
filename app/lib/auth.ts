@@ -1,4 +1,5 @@
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { prisma } from './prisma';
 
 export async function hashPassword(password: string): Promise<string> {
@@ -21,6 +22,11 @@ export async function createUser(email: string, password: string, name?: string)
       name,
     },
   });
+}
+
+export async function createUserWithRandomPassword(email: string, name?: string) {
+  const randomPassword = crypto.randomBytes(12).toString('hex');
+  return await createUser(email, randomPassword, name);
 }
 
 export async function authenticateUser(email: string, password: string) {
