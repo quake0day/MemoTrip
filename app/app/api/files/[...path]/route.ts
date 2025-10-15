@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { readFile as fsReadFile } from 'fs/promises';
 import path from 'path';
+import { resolveRelativeStoragePath } from '@/lib/storage';
 
 export async function GET(
   _request: NextRequest,
@@ -17,13 +18,7 @@ export async function GET(
     const relativePath = filePath.join('/');
 
     // Ensure the path is within the data directory for security
-    const dataDir = path.join(process.cwd(), 'data');
-    const fullPath = path.join(dataDir, relativePath);
-
-    // Security check: prevent directory traversal
-    if (!fullPath.startsWith(dataDir)) {
-      return NextResponse.json({ error: 'Invalid file path' }, { status: 403 });
-    }
+    const fullPath = resolveRelativeStoragePath(relativePath);
 
     // Read the file
     const fileBuffer = await fsReadFile(fullPath);

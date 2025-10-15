@@ -1,5 +1,7 @@
 'use client';
 
+/* eslint-disable @next/next/no-img-element */
+
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
@@ -186,6 +188,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
       const formData = new FormData();
       formData.append('file', file);
       formData.append('userId', user.id);
+      formData.append('uploaderId', user.id);
 
       const res = await fetch(`/api/trips/${tripId}/receipts`, {
         method: 'POST',
@@ -217,6 +220,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
       const formData = new FormData();
       formData.append('file', file);
       formData.append('userId', user.id);
+      formData.append('uploaderId', user.id);
 
       const res = await fetch(`/api/trips/${tripId}/photos`, {
         method: 'POST',
@@ -259,7 +263,11 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
     try {
       const res = await fetch(`/api/households?userId=${user.id}`);
       const data = await res.json();
-      setAvailableHouseholds(data.households || []);
+      const participantIds = new Set(participants.map(p => p.householdId));
+      const filtered = (data.households || []).filter(
+        (household: { id: string }) => !participantIds.has(household.id)
+      );
+      setAvailableHouseholds(filtered);
     } catch (error) {
       console.error('Failed to fetch households:', error);
     }

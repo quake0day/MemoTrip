@@ -38,6 +38,7 @@ export async function authenticateUser(email: string, password: string) {
   }
 
   // Don't return password
-  const { password: _, ...userWithoutPassword } = user;
+  const { password: _password, ...userWithoutPassword } = user;
+  void _password;
   return userWithoutPassword;
 }
