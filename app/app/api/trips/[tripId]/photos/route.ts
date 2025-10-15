@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/lib/prisma';
 import { saveFile } from '@/lib/storage';
+import * as exifr from 'exifr';
 
 export async function GET(
   _request: NextRequest,
@@ -25,7 +26,12 @@ export async function GET(
       },
     });
 
-    return NextResponse.json({ photos });
+    const serialized = photos.map((photo) => ({
+      ...photo,
+      tags: Array.isArray(photo.tagsJson) ? photo.tagsJson : [],
+    }));
+
+    return NextResponse.json({ photos: serialized });
   } catch (error) {
     console.error('Error fetching photos:', error);
     return NextResponse.json(
@@ -69,12 +75,34 @@ export async function POST(
     // Save the file
     const filePath = await saveFile(buffer, file.name, 'photo');
 
+    let exifData: Record<string, unknown> | null = null;
+    let width: number | null = null;
+    let height: number | null = null;
+
+    try {
+      const parsed = await exifr.parse(buffer, { translateValues: true });
+      if (parsed && typeof parsed === 'object') {
+        exifData = parsed as Record<string, unknown>;
+        if (typeof parsed.ImageWidth === 'number') {
+          width = parsed.ImageWidth;
+        }
+        if (typeof parsed.ImageHeight === 'number') {
+          height = parsed.ImageHeight;
+        }
+      }
+    } catch (exifError) {
+      console.warn('Failed to parse EXIF metadata:', exifError);
+    }
+
     // Create photo record
     const photo = await prisma.photo.create({
       data: {
         tripId,
         filePath,
         uploaderId: userId,
+        exifJson: exifData,
+        width: width ?? undefined,
+        height: height ?? undefined,
       },
       include: {
         uploader: {
@@ -87,7 +115,15 @@ export async function POST(
       },
     });
 
-    return NextResponse.json({ photo }, { status: 201 });
+    return NextResponse.json(
+      {
+        photo: {
+          ...photo,
+          tags: [],
+        },
+      },
+      { status: 201 }
+    );
   } catch (error) {
     console.error('Error uploading photo:', error);
     return NextResponse.json(

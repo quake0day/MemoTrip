@@ -3,9 +3,11 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { useI18n } from '../providers';
 
 export default function LoginPage() {
   const router = useRouter();
+  const { t } = useI18n();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -26,14 +28,14 @@ export default function LoginPage() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Login failed');
+        throw new Error(data.error || t('login.errorGeneric'));
       }
 
       // Store user data in localStorage
       localStorage.setItem('user', JSON.stringify(data.user));
       router.push('/dashboard');
     } catch (err: any) {
-      setError(err.message);
+      setError(err?.message || t('login.errorGeneric'));
     } finally {
       setLoading(false);
     }
@@ -45,10 +47,10 @@ export default function LoginPage() {
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-8">
           <div className="text-center mb-8">
             <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
-              Welcome Back
+              {t('login.title')}
             </h1>
             <p className="text-gray-600 dark:text-gray-400">
-              Sign in to your MemoTrip account
+              {t('login.subtitle')}
             </p>
           </div>
 
@@ -58,7 +60,7 @@ export default function LoginPage() {
                 htmlFor="email"
                 className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
               >
-                Email
+                {t('login.emailLabel')}
               </label>
               <input
                 id="email"
@@ -67,7 +69,7 @@ export default function LoginPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-                placeholder="you@example.com"
+                placeholder={t('register.emailPlaceholder')}
               />
             </div>
 
@@ -76,7 +78,7 @@ export default function LoginPage() {
                 htmlFor="password"
                 className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
               >
-                Password
+                {t('login.passwordLabel')}
               </label>
               <input
                 id="password"
@@ -100,26 +102,26 @@ export default function LoginPage() {
               disabled={loading}
               className="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              {loading ? 'Signing in...' : 'Sign In'}
+              {loading ? t('login.submitLoading') : t('login.submitIdle')}
             </button>
           </form>
 
           <div className="mt-6 text-center text-sm">
             <span className="text-gray-600 dark:text-gray-400">
-              Don&apos;t have an account?{' '}
+              {t('login.noAccount')}{' '}
             </span>
             <Link
               href="/register"
               className="text-blue-600 hover:text-blue-700 font-medium"
             >
-              Sign up
+              {t('login.signUp')}
             </Link>
           </div>
         </div>
 
         <div className="mt-4 text-center text-sm text-gray-600 dark:text-gray-400">
           <Link href="/" className="hover:text-gray-900 dark:hover:text-white">
-            ← Back to home
+            {t('login.back')}
           </Link>
         </div>
       </div>

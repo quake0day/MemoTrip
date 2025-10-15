@@ -2,9 +2,11 @@
 
 /* eslint-disable @next/next/no-img-element */
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import JSZip from 'jszip';
+import { useI18n } from '../../providers';
 
 interface Trip {
   id: string;
@@ -69,12 +71,36 @@ interface Photo {
     email: string;
   };
   createdAt: string;
+  exifJson?: Record<string, unknown> | null;
+  width?: number | null;
+  height?: number | null;
+  tags?: string[];
+}
+
+interface Invite {
+  id: string;
+  email: string | null;
+  householdId: string | null;
+  expiresAt: string;
+  createdAt: string;
+  used: number;
+  household?: {
+    id: string;
+    displayName: string;
+  } | null;
+}
+
+interface ParticipantGroup {
+  id: string;
+  name: string;
+  householdIds: string[];
 }
 
 type TabType = 'receipts' | 'settlements' | 'photos' | 'participants';
 
 export default function TripDetailPage({ params }: { params: Promise<{ tripId: string }> }) {
   const router = useRouter();
+  const { t } = useI18n();
   const [tripId, setTripId] = useState<string>('');
   const [user, setUser] = useState<any>(null);
   const [trip, setTrip] = useState<Trip | null>(null);
@@ -86,10 +112,16 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
   const [participants, setParticipants] = useState<Participant[]>([]);
   const [settlements, setSettlements] = useState<Settlement[]>([]);
   const [photos, setPhotos] = useState<Photo[]>([]);
+  const [invites, setInvites] = useState<Invite[]>([]);
 
   // Upload states
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
+
+  // Settlement editing states
+  const [editingSettlement, setEditingSettlement] = useState<Settlement | null>(null);
+  const [isEditingSettlement, setIsEditingSettlement] = useState(false);
+  const [savingSettlement, setSavingSettlement] = useState(false);
 
   // Participant management states
   const [showAddParticipantModal, setShowAddParticipantModal] = useState(false);
@@ -100,6 +132,107 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
   const [selectedHousehold, setSelectedHousehold] = useState('');
   const [participantWeight, setParticipantWeight] = useState(1.0);
   const [addingParticipant, setAddingParticipant] = useState(false);
+  const [participantError, setParticipantError] = useState('');
+  const [addParticipantMode, setAddParticipantMode] = useState<'existing' | 'invite'>('existing');
+  const [inviteEmail, setInviteEmail] = useState('');
+  const [inviteName, setInviteName] = useState('');
+  const [inviteWeight, setInviteWeight] = useState(1);
+  const [creatingInvite, setCreatingInvite] = useState(false);
+
+  // Grouping state
+  const [groups, setGroups] = useState<ParticipantGroup[]>([]);
+  const groupsInitializedRef = useRef(false);
+
+  // Photo interaction states
+  const [selectedPhotos, setSelectedPhotos] = useState<Set<string>>(new Set());
+  const [isBulkDownloading, setIsBulkDownloading] = useState(false);
+  const [activePhoto, setActivePhoto] = useState<Photo | null>(null);
+  const [photoZoom, setPhotoZoom] = useState(1);
+  const [photoTagInput, setPhotoTagInput] = useState('');
+  const [photoUpdateError, setPhotoUpdateError] = useState('');
+
+  const groupsStorageKey = useMemo(
+    () => (tripId ? `trip-groups-${tripId}` : null),
+    [tripId]
+  );
+
+  const persistGroups = useCallback(
+    (nextGroups: ParticipantGroup[]) => {
+      if (!groupsStorageKey) return;
+      localStorage.setItem(groupsStorageKey, JSON.stringify(nextGroups));
+    },
+    [groupsStorageKey]
+  );
+
+  useEffect(() => {
+    if (!groupsStorageKey || groupsInitializedRef.current) return;
+    const stored = localStorage.getItem(groupsStorageKey);
+    if (stored) {
+      try {
+        const parsed = JSON.parse(stored) as ParticipantGroup[];
+        if (Array.isArray(parsed)) {
+          setGroups(parsed);
+        } else {
+          setGroups([{ id: 'group-ungrouped', name: '未分组', householdIds: [] }]);
+        }
+      } catch (error) {
+        console.warn('Failed to parse stored groups', error);
+        setGroups([{ id: 'group-ungrouped', name: '未分组', householdIds: [] }]);
+      }
+    } else {
+      setGroups([{ id: 'group-ungrouped', name: '未分组', householdIds: [] }]);
+    }
+    groupsInitializedRef.current = true;
+  }, [groupsStorageKey]);
+
+  useEffect(() => {
+    if (!groupsInitializedRef.current) {
+      return;
+    }
+
+    if (participants.length === 0) {
+      const emptyGroups: ParticipantGroup[] = [
+        { id: 'group-ungrouped', name: '未分组', householdIds: [] },
+      ];
+      setGroups(emptyGroups);
+      persistGroups(emptyGroups);
+      return;
+    }
+
+    setGroups(prevGroups => {
+      const participantIds = new Set(participants.map(p => p.householdId));
+      const sanitized = prevGroups.map(group => ({
+        ...group,
+        householdIds: group.householdIds.filter(id => participantIds.has(id)),
+      }));
+
+      let ungrouped = sanitized.find(group => group.id === 'group-ungrouped');
+      const otherGroups = sanitized
+        .filter(group => group.id !== 'group-ungrouped')
+        .map(group => ({ ...group }));
+
+      if (!ungrouped) {
+        ungrouped = { id: 'group-ungrouped', name: '未分组', householdIds: [] };
+      } else {
+        ungrouped = { ...ungrouped };
+      }
+
+      const assigned = new Set<string>();
+      otherGroups.forEach(group => {
+        group.householdIds.forEach(id => assigned.add(id));
+      });
+
+      participantIds.forEach(id => {
+        if (!assigned.has(id) && !ungrouped!.householdIds.includes(id)) {
+          ungrouped!.householdIds = [...ungrouped!.householdIds, id];
+        }
+      });
+
+      const nextGroups = [ungrouped!, ...otherGroups];
+      persistGroups(nextGroups);
+      return nextGroups;
+    });
+  }, [participants, persistGroups]);
 
   useEffect(() => {
     const userData = localStorage.getItem('user');
@@ -129,6 +262,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
         fetchParticipants(id),
         fetchSettlements(id),
         fetchPhotos(id),
+        fetchInvites(id),
       ]);
     } catch (error) {
       console.error('Failed to fetch trip data:', error);
@@ -161,7 +295,14 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
     try {
       const res = await fetch(`/api/trips/${id}/settlements`);
       const data = await res.json();
-      setSettlements(data.settlements || []);
+      const settlementRecords: Settlement[] = data.settlements || [];
+      setSettlements(settlementRecords);
+      if (!isEditingSettlement && settlementRecords.length > 0) {
+        setEditingSettlement(JSON.parse(JSON.stringify(settlementRecords[0])));
+      }
+      if (settlementRecords.length === 0) {
+        setEditingSettlement(null);
+      }
     } catch (error) {
       console.error('Failed to fetch settlements:', error);
     }
@@ -171,9 +312,23 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
     try {
       const res = await fetch(`/api/trips/${id}/photos`);
       const data = await res.json();
-      setPhotos(data.photos || []);
+      const normalized = (data.photos || []).map((photo: Photo) => ({
+        ...photo,
+        tags: Array.isArray(photo.tags) ? photo.tags : [],
+      }));
+      setPhotos(normalized);
     } catch (error) {
       console.error('Failed to fetch photos:', error);
+    }
+  };
+
+  const fetchInvites = async (id: string) => {
+    try {
+      const res = await fetch(`/api/trips/${id}/invites`);
+      const data = await res.json();
+      setInvites(data.invites || []);
+    } catch (error) {
+      console.error('Failed to fetch invites:', error);
     }
   };
 
@@ -277,6 +432,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
     e.preventDefault();
     if (!selectedHousehold) return;
 
+    setParticipantError('');
     setAddingParticipant(true);
     try {
       const res = await fetch(`/api/trips/${tripId}/participants`, {
@@ -298,9 +454,492 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
       setSelectedHousehold('');
       setParticipantWeight(1.0);
     } catch (error: any) {
-      setUploadError(error.message);
+      setParticipantError(error.message);
     } finally {
       setAddingParticipant(false);
+    }
+  };
+
+  const handleCreateInvite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user) {
+      setParticipantError('You must be logged in to invite participants.');
+      return;
+    }
+
+    setParticipantError('');
+    setCreatingInvite(true);
+    try {
+      const res = await fetch(`/api/trips/${tripId}/invites`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: inviteEmail,
+          householdName: inviteName || inviteEmail,
+          weight: inviteWeight,
+          createdBy: user.id,
+        }),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || 'Failed to send invite');
+      }
+
+      await Promise.all([fetchParticipants(tripId), fetchInvites(tripId)]);
+      setShowAddParticipantModal(false);
+      setInviteEmail('');
+      setInviteName('');
+      setInviteWeight(1);
+    } catch (error: any) {
+      setParticipantError(error.message);
+    } finally {
+      setCreatingInvite(false);
+    }
+  };
+
+  const handleCloseParticipantModal = () => {
+    setShowAddParticipantModal(false);
+    setSelectedHousehold('');
+    setParticipantWeight(1.0);
+    setParticipantError('');
+    setAddParticipantMode('existing');
+    setInviteEmail('');
+    setInviteName('');
+    setInviteWeight(1);
+  };
+
+  const householdMap = useMemo(() => {
+    const map = new Map<string, Participant>();
+    participants.forEach(participant => {
+      map.set(participant.householdId, participant);
+    });
+    return map;
+  }, [participants]);
+
+  const handleCreateGroup = () => {
+    const name = prompt('输入新的分组名称');
+    if (!name) return;
+
+    setGroups(prev => {
+      const next = [
+        ...prev,
+        { id: `group-${Date.now()}`, name, householdIds: [] },
+      ];
+      persistGroups(next);
+      return next;
+    });
+  };
+
+  const handleRenameGroup = (groupId: string) => {
+    const group = groups.find(g => g.id === groupId);
+    if (!group) return;
+    const name = prompt('更新分组名称', group.name);
+    if (!name) return;
+
+    setGroups(prev => {
+      const next = prev.map(g =>
+        g.id === groupId
+          ? { ...g, name }
+          : g
+      );
+      persistGroups(next);
+      return next;
+    });
+  };
+
+  const handleDeleteGroup = (groupId: string) => {
+    if (groupId === 'group-ungrouped') return;
+    if (!confirm('确认删除这个分组？成员会移动到未分组。')) return;
+
+    setGroups(prev => {
+      const groupToDelete = prev.find(group => group.id === groupId);
+      const remaining = prev.filter(group => group.id !== groupId);
+      const ungroupedIndex = remaining.findIndex(group => group.id === 'group-ungrouped');
+
+      if (groupToDelete && groupToDelete.householdIds.length > 0) {
+        if (ungroupedIndex >= 0) {
+          const ungrouped = {
+            ...remaining[ungroupedIndex],
+            householdIds: [
+              ...remaining[ungroupedIndex].householdIds,
+              ...groupToDelete.householdIds,
+            ],
+          };
+          remaining[ungroupedIndex] = ungrouped;
+        } else {
+          remaining.unshift({
+            id: 'group-ungrouped',
+            name: '未分组',
+            householdIds: [...groupToDelete.householdIds],
+          });
+        }
+      }
+
+      persistGroups(remaining);
+      return remaining;
+    });
+  };
+
+  const handleHouseholdDrop = (groupId: string, householdId: string) => {
+    setGroups(prev => {
+      const next = prev.map(group => ({
+        ...group,
+        householdIds: group.householdIds.filter(id => id !== householdId),
+      }));
+
+      const index = next.findIndex(group => group.id === groupId);
+      if (index >= 0) {
+        const targetGroup = next[index];
+        next[index] = {
+          ...targetGroup,
+          householdIds: targetGroup.householdIds.includes(householdId)
+            ? targetGroup.householdIds
+            : [...targetGroup.householdIds, householdId],
+        };
+      }
+
+      persistGroups(next);
+      return next;
+    });
+  };
+
+  const handleGroupDragOver = (event: React.DragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+  };
+
+  const handleHouseholdDragStart = (
+    event: React.DragEvent<HTMLDivElement>,
+    householdId: string
+  ) => {
+    event.dataTransfer.setData('text/plain', householdId);
+  };
+
+  useEffect(() => {
+    if (photos.length === 0) {
+      setSelectedPhotos(new Set());
+      return;
+    }
+
+    setSelectedPhotos(prev => {
+      const validIds = new Set(photos.map(photo => photo.id));
+      const next = new Set<string>();
+      prev.forEach(id => {
+        if (validIds.has(id)) {
+          next.add(id);
+        }
+      });
+      return next;
+    });
+  }, [photos]);
+
+  const togglePhotoSelection = (photoId: string) => {
+    setSelectedPhotos(prev => {
+      const next = new Set(prev);
+      if (next.has(photoId)) {
+        next.delete(photoId);
+      } else {
+        next.add(photoId);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAllPhotos = () => {
+    if (selectedPhotos.size === photos.length) {
+      setSelectedPhotos(new Set());
+    } else {
+      setSelectedPhotos(new Set(photos.map(photo => photo.id)));
+    }
+  };
+
+  const handleDownloadSelected = async () => {
+    if (selectedPhotos.size === 0) return;
+
+    setIsBulkDownloading(true);
+    try {
+      const zip = new JSZip();
+      const selected = photos.filter(photo => selectedPhotos.has(photo.id));
+
+      await Promise.all(
+        selected.map(async photo => {
+          const response = await fetch(`/api/files/${photo.filePath}`);
+          if (!response.ok) {
+            throw new Error('无法下载照片');
+          }
+          const blob = await response.blob();
+          const fileName = photo.filePath.split('/').pop() || `${photo.id}.jpg`;
+          zip.file(fileName, blob);
+        })
+      );
+
+      const zipContent = await zip.generateAsync({ type: 'blob' });
+      const url = URL.createObjectURL(zipContent);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = `${trip?.name || 'trip'}-photos.zip`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to download photos:', error);
+      alert('批量下载失败，请稍后再试。');
+    } finally {
+      setIsBulkDownloading(false);
+    }
+  };
+
+  const handleOpenPhoto = (photo: Photo) => {
+    setActivePhoto(photo);
+    setPhotoZoom(1);
+    setPhotoTagInput('');
+    setPhotoUpdateError('');
+  };
+
+  const handleClosePhotoModal = () => {
+    setActivePhoto(null);
+    setPhotoZoom(1);
+    setPhotoTagInput('');
+    setPhotoUpdateError('');
+  };
+
+  const handleDownloadSinglePhoto = async (photo: Photo) => {
+    try {
+      const response = await fetch(`/api/files/${photo.filePath}`);
+      if (!response.ok) {
+        throw new Error('无法下载照片');
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = photo.filePath.split('/').pop() || `${photo.id}.jpg`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Failed to download photo:', error);
+      alert('下载失败，请稍后再试。');
+    }
+  };
+
+  const getExifEntries = (photo: Photo | null) => {
+    if (!photo?.exifJson || typeof photo.exifJson !== 'object') return [];
+
+    const preferredKeys = [
+      'Make',
+      'Model',
+      'LensModel',
+      'ExposureTime',
+      'FNumber',
+      'ISO',
+      'FocalLength',
+      'ShutterSpeedValue',
+    ];
+
+    const exif = photo.exifJson as Record<string, unknown>;
+    const preferred = preferredKeys
+      .map((key) => [key, exif[key]] as [string, unknown])
+      .filter(([, value]) => value !== undefined && value !== null);
+
+    const remainingEntries = Object.entries(exif)
+      .filter(([key]) => !preferredKeys.includes(key))
+      .slice(0, Math.max(0, 10 - preferred.length));
+
+    return [...preferred, ...remainingEntries];
+  };
+
+  const updatePhotoTags = async (photoId: string, tags: string[]) => {
+    const response = await fetch(`/api/trips/${tripId}/photos/${photoId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tags }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || '更新标签失败');
+    }
+
+    const data = await response.json();
+    setPhotos(prev =>
+      prev.map(photo =>
+        photo.id === photoId
+          ? { ...photo, tags: data.photo.tags }
+          : photo
+      )
+    );
+
+    setActivePhoto(prev =>
+      prev && prev.id === photoId
+        ? { ...prev, tags: data.photo.tags }
+        : prev
+    );
+  };
+
+  const handleAddTag = async () => {
+    if (!activePhoto) return;
+    const newTag = photoTagInput.trim();
+    if (!newTag) return;
+
+    const currentTags = activePhoto.tags || [];
+    if (currentTags.includes(newTag)) {
+      setPhotoUpdateError('标签已存在');
+      return;
+    }
+
+    try {
+      await updatePhotoTags(activePhoto.id, [...currentTags, newTag]);
+      setPhotoTagInput('');
+      setPhotoUpdateError('');
+    } catch (error: any) {
+      setPhotoUpdateError(error.message || '更新标签失败');
+    }
+  };
+
+  const handleRemoveTag = async (tag: string) => {
+    if (!activePhoto) return;
+    const currentTags = activePhoto.tags || [];
+    try {
+      await updatePhotoTags(
+        activePhoto.id,
+        currentTags.filter(existing => existing !== tag)
+      );
+      setPhotoUpdateError('');
+    } catch (error: any) {
+      setPhotoUpdateError(error.message || '删除标签失败');
+    }
+  };
+
+  const adjustPhotoZoom = (delta: number) => {
+    setPhotoZoom(prev => {
+      const next = prev + delta;
+      return Math.min(4, Math.max(0.5, Number(next.toFixed(2))));
+    });
+  };
+
+  const latestSettlement = useMemo(
+    () => (settlements.length > 0 ? settlements[0] : null),
+    [settlements]
+  );
+
+  const displaySettlement = useMemo(() => {
+    if (isEditingSettlement && editingSettlement) {
+      return editingSettlement;
+    }
+    return latestSettlement;
+  }, [isEditingSettlement, editingSettlement, latestSettlement]);
+
+  const handleSettlementHouseholdChange = (
+    index: number,
+    field: 'shouldPay' | 'paid' | 'netAmount' | 'weight',
+    value: number
+  ) => {
+    setEditingSettlement(prev => {
+      if (!prev || !prev.tableJson?.households) return prev;
+      const households = prev.tableJson.households.map((row: any, rowIndex: number) =>
+        rowIndex === index ? { ...row, [field]: value } : row
+      );
+      return {
+        ...prev,
+        tableJson: {
+          ...prev.tableJson,
+          households,
+        },
+      };
+    });
+  };
+
+  const handleTransferAmountChange = (index: number, amount: number) => {
+    setEditingSettlement(prev => {
+      if (!prev || !Array.isArray(prev.transfersJson)) return prev;
+      const transfers = prev.transfersJson.map((transfer: any, transferIndex: number) =>
+        transferIndex === index ? { ...transfer, amount } : transfer
+      );
+      return { ...prev, transfersJson: transfers };
+    });
+  };
+
+  const handleToggleSettlementLock = () => {
+    if (!displaySettlement) return;
+    setEditingSettlement(prev => {
+      const base = prev
+        ? { ...prev }
+        : JSON.parse(JSON.stringify(displaySettlement));
+      base.locked = !base.locked;
+      return base;
+    });
+    setIsEditingSettlement(true);
+  };
+
+  const handleEditSettlement = () => {
+    if (!latestSettlement) return;
+    setEditingSettlement(JSON.parse(JSON.stringify(latestSettlement)));
+    setIsEditingSettlement(true);
+  };
+
+  const handleResetSettlement = () => {
+    if (latestSettlement) {
+      setEditingSettlement(JSON.parse(JSON.stringify(latestSettlement)));
+    } else {
+      setEditingSettlement(null);
+    }
+    setIsEditingSettlement(false);
+  };
+
+  const handleExportSettlement = () => {
+    const active = editingSettlement || latestSettlement;
+    if (!active || !active.tableJson?.households) return;
+
+    const headers = ['Household', 'Weight', 'Should Pay', 'Paid', 'Net Amount'];
+    const rows = active.tableJson.households.map((row: any) => [
+      row.householdName,
+      row.weight,
+      row.shouldPay,
+      row.paid,
+      row.netAmount,
+    ]);
+
+    const csvContent = [headers, ...rows]
+      .map((row) => row.join(','))
+      .join('\n');
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `${trip?.name || 'trip'}-settlement.csv`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const handleSaveSettlement = async () => {
+    if (!editingSettlement) return;
+    setSavingSettlement(true);
+    try {
+      const response = await fetch(
+        `/api/trips/${tripId}/settlements/${editingSettlement.id}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tableJson: editingSettlement.tableJson,
+            transfersJson: editingSettlement.transfersJson,
+            locked: editingSettlement.locked,
+          }),
+        }
+      );
+
+      if (!response.ok) {
+        const error = await response.json();
+        throw new Error(error.error || 'Failed to save settlement');
+      }
+
+      await fetchSettlements(tripId);
+      setIsEditingSettlement(false);
+    } catch (error) {
+      console.error('Failed to update settlement:', error);
+      alert('保存结算数据失败，请稍后再试。');
+    } finally {
+      setSavingSettlement(false);
     }
   };
 
@@ -326,7 +965,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="text-xl">Loading...</div>
+        <div className="text-xl">{t('trip.loading')}</div>
       </div>
     );
   }
@@ -342,13 +981,13 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                 href="/dashboard"
                 className="text-sm text-gray-600 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white mb-2 inline-block"
               >
-                ← Back to Dashboard
+                {t('trip.backToDashboard')}
               </Link>
               <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
                 {trip?.name}
               </h1>
               <p className="text-sm text-gray-600 dark:text-gray-400">
-                Currency: {trip?.currency}
+                {t('trip.currency', { currency: trip?.currency ?? '' })}
               </p>
             </div>
           </div>
@@ -367,7 +1006,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
               }`}
             >
-              Receipts ({receipts.length})
+              {t('trip.tabs.receipts', { count: receipts.length })}
             </button>
             <button
               onClick={() => setActiveTab('settlements')}
@@ -377,7 +1016,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
               }`}
             >
-              Settlements ({settlements.length})
+              {t('trip.tabs.settlements', { count: settlements.length })}
             </button>
             <button
               onClick={() => setActiveTab('photos')}
@@ -387,7 +1026,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
               }`}
             >
-              Photos ({photos.length})
+              {t('trip.tabs.photos', { count: photos.length })}
             </button>
             <button
               onClick={() => setActiveTab('participants')}
@@ -397,7 +1036,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300'
               }`}
             >
-              Participants ({participants.length})
+              {t('trip.tabs.participants', { count: participants.length })}
             </button>
           </div>
         </div>
@@ -416,10 +1055,10 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
           <div>
             <div className="mb-6 flex justify-between items-center">
               <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-                Receipt Management
+                {t('trip.receipts.title')}
               </h2>
               <label className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 cursor-pointer">
-                {uploading ? 'Uploading...' : '+ Upload Receipt'}
+                {uploading ? t('trip.receipts.uploading') : t('trip.receipts.upload')}
                 <input
                   type="file"
                   accept="image/*"
@@ -432,9 +1071,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
 
             {receipts.length === 0 ? (
               <div className="text-center py-12 bg-white dark:bg-gray-800 rounded-lg shadow">
-                <p className="text-gray-600 dark:text-gray-400">
-                  No receipts uploaded yet
-                </p>
+                <p className="text-gray-600 dark:text-gray-400">{t('trip.receipts.empty')}</p>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
@@ -469,7 +1106,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                         </span>
                       </div>
                       <p className="text-sm text-gray-600 dark:text-gray-400 mb-2">
-                        Uploaded by: {receipt.uploader.name}
+                        {t('trip.receipts.uploader', { name: receipt.uploader.name })}
                       </p>
                       <p className="text-xs text-gray-500 dark:text-gray-500">
                         {new Date(receipt.createdAt).toLocaleDateString()}
@@ -477,10 +1114,13 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                       {receipt.parsedJson && (
                         <div className="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
                           <p className="text-sm font-medium text-gray-900 dark:text-white">
-                            Amount: {receipt.parsedJson.amount || 'N/A'}
+                            {t('trip.receipts.parsed.amount', {
+                              amount:
+                                receipt.parsedJson.amount ?? t('trip.receipts.parsed.noAmount'),
+                            })}
                           </p>
                           <p className="text-xs text-gray-600 dark:text-gray-400">
-                            {receipt.parsedJson.merchant || 'Unknown merchant'}
+                            {receipt.parsedJson.merchant || t('trip.receipts.parsed.unknownMerchant')}
                           </p>
                         </div>
                       )}
@@ -494,87 +1134,334 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
 
         {/* Settlements Tab */}
         {activeTab === 'settlements' && (
-          <div>
-            <div className="mb-6 flex justify-between items-center">
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-                Settlement History
-              </h2>
-              <button
-                onClick={handleRecalculateSettlement}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-              >
-                Recalculate Settlement
-              </button>
+          <div className="space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
+                  {t('trip.settlements.workspaceTitle')}
+                </h2>
+                {displaySettlement ? (
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    {t('trip.settlements.latestVersion', {
+                      version: displaySettlement.version,
+                      date: new Date(displaySettlement.createdAt).toLocaleString(),
+                    })}
+                  </p>
+                ) : (
+                  <p className="text-sm text-gray-600 dark:text-gray-400">
+                    {t('trip.settlements.generatePrompt')}
+                  </p>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={handleRecalculateSettlement}
+                  className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+                >
+                  {t('trip.settlements.recalculate')}
+                </button>
+                <button
+                  onClick={handleExportSettlement}
+                  disabled={!displaySettlement}
+                  className="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {t('trip.settlements.exportCsv')}
+                </button>
+                <button
+                  onClick={handleToggleSettlementLock}
+                  disabled={!displaySettlement}
+                  className="px-4 py-2 bg-slate-600 text-white rounded-lg hover:bg-slate-700 disabled:opacity-50"
+                >
+                  {displaySettlement?.locked
+                    ? t('trip.settlements.unlockTable')
+                    : t('trip.settlements.lockTable')}
+                </button>
+                {isEditingSettlement ? (
+                  <>
+                    <button
+                      onClick={handleResetSettlement}
+                      className="px-4 py-2 bg-gray-200 text-gray-900 rounded-lg hover:bg-gray-300"
+                    >
+                      {t('trip.settlements.cancel')}
+                    </button>
+                    <button
+                      onClick={handleSaveSettlement}
+                      disabled={savingSettlement}
+                      className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
+                    >
+                      {savingSettlement
+                        ? t('trip.settlements.saving')
+                        : t('trip.settlements.save')}
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    onClick={handleEditSettlement}
+                    disabled={!latestSettlement}
+                    className="px-4 py-2 bg-purple-600 text-white rounded-lg hover:bg-purple-700 disabled:opacity-50"
+                  >
+                    {t('trip.settlements.edit')}
+                  </button>
+                )}
+              </div>
             </div>
 
-            {settlements.length === 0 ? (
+            {displaySettlement ? (
+              <div className="bg-white dark:bg-gray-800 rounded-lg shadow">
+                <div className="border-b border-gray-200 dark:border-gray-700 px-6 py-4 flex flex-wrap justify-between gap-4">
+                  <div>
+                    <p className="text-sm text-gray-600 dark:text-gray-400">
+                      {t('trip.settlements.totalWeight', {
+                        weight:
+                          displaySettlement.tableJson?.totalWeight?.toFixed?.(2) ??
+                          displaySettlement.tableJson?.totalWeight ??
+                          '—',
+                      })}
+                    </p>
+                    {displaySettlement.locked && (
+                      <p className="text-sm text-red-500">
+                        {t('trip.settlements.lockedNotice')}
+                      </p>
+                    )}
+                  </div>
+                  <Link
+                    href={`/export/settlement/${tripId}/${displaySettlement.version}`}
+                    target="_blank"
+                    className="text-sm text-blue-600 hover:text-blue-700"
+                  >
+                    {t('trip.settlements.viewReport')}
+                  </Link>
+                </div>
+
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                    <thead className="bg-gray-50 dark:bg-gray-700">
+                      <tr>
+                        <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-300">
+                          {t('trip.settlements.table.household')}
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-300">
+                          {t('trip.settlements.table.weight')}
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-300">
+                          {t('trip.settlements.table.shouldPay')}
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-300">
+                          {t('trip.settlements.table.paid')}
+                        </th>
+                        <th className="px-6 py-3 text-left text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-300">
+                          {t('trip.settlements.table.net')}
+                        </th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                      {(displaySettlement.tableJson?.households || []).map(
+                        (row: any, index: number) => (
+                          <tr key={row.householdId || index}>
+                            <td className="px-6 py-4">
+                              <p className="text-sm font-semibold text-gray-900 dark:text-white">
+                                {row.householdName}
+                              </p>
+                              <p className="text-xs text-gray-500 dark:text-gray-400">
+                                {t('trip.settlements.table.adultsKids', {
+                                  adults: row.adults ?? 0,
+                                  kids: row.kids ?? 0,
+                                })}
+                              </p>
+                            </td>
+                            <td className="px-6 py-4">
+                              {isEditingSettlement ? (
+                                <input
+                                  type="number"
+                                  step="0.1"
+                                  min="0"
+                                  value={row.weight ?? 0}
+                                  onChange={(event) =>
+                                    handleSettlementHouseholdChange(
+                                      index,
+                                      'weight',
+                                      parseFloat(event.target.value || '0')
+                                    )
+                                  }
+                                  className="w-24 rounded border border-gray-300 px-2 py-1 text-sm"
+                                  disabled={displaySettlement.locked}
+                                />
+                              ) : (
+                                <span className="text-sm text-gray-900 dark:text-white">
+                                  {row.weight?.toFixed?.(2) ?? row.weight}
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4">
+                              {isEditingSettlement ? (
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  value={row.shouldPay ?? 0}
+                                  onChange={(event) =>
+                                    handleSettlementHouseholdChange(
+                                      index,
+                                      'shouldPay',
+                                      parseFloat(event.target.value || '0')
+                                    )
+                                  }
+                                  className="w-28 rounded border border-gray-300 px-2 py-1 text-sm"
+                                  disabled={displaySettlement.locked}
+                                />
+                              ) : (
+                                <span className="text-sm text-gray-900 dark:text-white">
+                                  {row.shouldPay?.toFixed?.(2) ?? row.shouldPay}
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4">
+                              {isEditingSettlement ? (
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  value={row.paid ?? 0}
+                                  onChange={(event) =>
+                                    handleSettlementHouseholdChange(
+                                      index,
+                                      'paid',
+                                      parseFloat(event.target.value || '0')
+                                    )
+                                  }
+                                  className="w-28 rounded border border-gray-300 px-2 py-1 text-sm"
+                                  disabled={displaySettlement.locked}
+                                />
+                              ) : (
+                                <span className="text-sm text-gray-900 dark:text-white">
+                                  {row.paid?.toFixed?.(2) ?? row.paid}
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-6 py-4">
+                              {isEditingSettlement ? (
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  value={row.netAmount ?? 0}
+                                  onChange={(event) =>
+                                    handleSettlementHouseholdChange(
+                                      index,
+                                      'netAmount',
+                                      parseFloat(event.target.value || '0')
+                                    )
+                                  }
+                                  className="w-28 rounded border border-gray-300 px-2 py-1 text-sm"
+                                  disabled={displaySettlement.locked}
+                                />
+                              ) : (
+                                <span
+                                  className={`text-sm font-medium ${
+                                    (row.netAmount ?? 0) >= 0
+                                      ? 'text-emerald-600'
+                                      : 'text-rose-600'
+                                  }`}
+                                >
+                                  {row.netAmount?.toFixed?.(2) ?? row.netAmount}
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        )
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="px-6 py-4 border-t border-gray-200 dark:border-gray-700">
+                  <h3 className="text-sm font-semibold text-gray-900 dark:text-white mb-3">
+                    Recommended Transfers
+                  </h3>
+                  {displaySettlement.transfersJson &&
+                  displaySettlement.transfersJson.length > 0 ? (
+                    <div className="space-y-2">
+                      {displaySettlement.transfersJson.map(
+                        (transfer: any, index: number) => (
+                          <div
+                            key={`${transfer.from}-${transfer.to}-${index}`}
+                            className="flex items-center justify-between rounded border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-700 px-3 py-2"
+                          >
+                            <span className="text-sm text-gray-700 dark:text-gray-200">
+                              {transfer.fromName} → {transfer.toName}
+                            </span>
+                            {isEditingSettlement ? (
+                              <input
+                                type="number"
+                                step="0.01"
+                                value={transfer.amount ?? 0}
+                                onChange={(event) =>
+                                  handleTransferAmountChange(
+                                    index,
+                                    parseFloat(event.target.value || '0')
+                                  )
+                                }
+                                className="w-28 rounded border border-gray-300 px-2 py-1 text-sm"
+                                disabled={displaySettlement.locked}
+                              />
+                            ) : (
+                              <span className="font-semibold text-gray-900 dark:text-white">
+                                {trip?.currency} {transfer.amount?.toFixed?.(2) ?? transfer.amount}
+                              </span>
+                            )}
+                          </div>
+                        )
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      No transfers suggested.
+                    </p>
+                  )}
+                </div>
+              </div>
+            ) : (
               <div className="text-center py-12 bg-white dark:bg-gray-800 rounded-lg shadow">
                 <p className="text-gray-600 dark:text-gray-400 mb-4">
-                  No settlements calculated yet
+                  {t('trip.settlements.empty')}
                 </p>
                 <button
                   onClick={handleRecalculateSettlement}
                   className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
                 >
-                  Calculate First Settlement
+                  {t('trip.settlements.calculateFirst')}
                 </button>
               </div>
-            ) : (
-              <div className="space-y-4">
-                {settlements.map((settlement) => (
-                  <div
-                    key={settlement.id}
-                    className="bg-white dark:bg-gray-800 rounded-lg shadow p-6"
-                  >
-                    <div className="flex justify-between items-center mb-4">
-                      <div>
-                        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                          Version {settlement.version}
-                        </h3>
-                        <p className="text-sm text-gray-600 dark:text-gray-400">
-                          {new Date(settlement.createdAt).toLocaleString()}
-                        </p>
-                      </div>
-                      <div className="flex gap-2">
-                        {settlement.locked && (
-                          <span className="px-3 py-1 bg-gray-100 text-gray-800 text-sm font-medium rounded">
-                            Locked
-                          </span>
-                        )}
+            )}
+
+            {settlements.length > 1 && (
+              <div className="mt-4">
+                <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-3">
+                  {t('trip.settlements.previousVersions')}
+                </h3>
+                <div className="grid gap-3 md:grid-cols-2">
+                  {settlements.slice(1).map((settlement) => (
+                    <div
+                      key={settlement.id}
+                      className="rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4"
+                    >
+                      <div className="flex justify-between items-center">
+                        <div>
+                          <p className="text-sm font-semibold text-gray-900 dark:text-white">
+                            {t('trip.settlements.versionLabel', { version: settlement.version })}
+                          </p>
+                          <p className="text-xs text-gray-500 dark:text-gray-400">
+                            {new Date(settlement.createdAt).toLocaleString()}
+                          </p>
+                        </div>
                         <Link
                           href={`/export/settlement/${tripId}/${settlement.version}`}
                           target="_blank"
-                          className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                          className="text-sm text-blue-600 hover:text-blue-700"
                         >
-                          View Export
+                          {t('trip.settlements.openReport')}
                         </Link>
                       </div>
                     </div>
-
-                    {settlement.transfersJson && settlement.transfersJson.length > 0 && (
-                      <div className="border-t border-gray-200 dark:border-gray-700 pt-4">
-                        <h4 className="font-medium text-gray-900 dark:text-white mb-3">
-                          Recommended Transfers:
-                        </h4>
-                        <div className="space-y-2">
-                          {settlement.transfersJson.map((transfer: any, idx: number) => (
-                            <div
-                              key={idx}
-                              className="flex items-center justify-between p-3 bg-gray-50 dark:bg-gray-700 rounded"
-                            >
-                              <span className="text-sm text-gray-700 dark:text-gray-300">
-                                {transfer.from} → {transfer.to}
-                              </span>
-                              <span className="font-medium text-gray-900 dark:text-white">
-                                {trip?.currency} {transfer.amount.toFixed(2)}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  ))}
+                </div>
               </div>
             )}
           </div>
@@ -582,148 +1469,496 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
 
         {/* Photos Tab */}
         {activeTab === 'photos' && (
-          <div>
-            <div className="mb-6 flex justify-between items-center">
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-                Photo Gallery
-              </h2>
-              <label className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 cursor-pointer">
-                {uploading ? 'Uploading...' : '+ Upload Photo'}
-                <input
-                  type="file"
-                  accept="image/*"
-                  onChange={handlePhotoUpload}
-                  disabled={uploading}
-                  className="hidden"
-                />
-              </label>
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-4">
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
+                  {t('trip.photos.title')}
+                </h2>
+                <p className="text-sm text-gray-600 dark:text-gray-400">
+                  {t('trip.photos.selectedCount', {
+                    selected: selectedPhotos.size,
+                    total: photos.length,
+                  })}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={handleSelectAllPhotos}
+                  disabled={photos.length === 0}
+                  className="px-4 py-2 rounded-lg border border-gray-300 text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                >
+                  {selectedPhotos.size === photos.length
+                    ? t('trip.photos.clearSelection')
+                    : t('trip.photos.selectAll')}
+                </button>
+                <button
+                  onClick={handleDownloadSelected}
+                  disabled={selectedPhotos.size === 0 || isBulkDownloading}
+                  className="px-4 py-2 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50"
+                >
+                  {isBulkDownloading
+                    ? t('trip.photos.preparing')
+                    : t('trip.photos.downloadSelected')}
+                </button>
+                <label className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 cursor-pointer">
+                  {uploading ? t('trip.photos.uploading') : t('trip.photos.upload')}
+                  <input
+                    type="file"
+                    accept="image/*"
+                    onChange={handlePhotoUpload}
+                    disabled={uploading}
+                    className="hidden"
+                  />
+                </label>
+              </div>
             </div>
+
+            {uploadError && (
+              <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {uploadError}
+              </div>
+            )}
 
             {photos.length === 0 ? (
               <div className="text-center py-12 bg-white dark:bg-gray-800 rounded-lg shadow">
-                <p className="text-gray-600 dark:text-gray-400">
-                  No photos uploaded yet
-                </p>
+                <p className="text-gray-600 dark:text-gray-400">{t('trip.photos.empty')}</p>
               </div>
             ) : (
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                {photos.map((photo) => (
-                  <div
-                    key={photo.id}
-                    className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden"
-                  >
-                    <div className="aspect-square bg-gray-200 dark:bg-gray-700">
-                      <img
-                        src={`/api/files/${photo.filePath}`}
-                        alt="Trip photo"
-                        className="w-full h-full object-cover"
-                      />
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                {photos.map((photo) => {
+                  const isSelected = selectedPhotos.has(photo.id);
+                  return (
+                    <div
+                      key={photo.id}
+                      className={`rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 shadow transition-shadow ${
+                        isSelected ? 'ring-2 ring-blue-500' : ''
+                      }`}
+                    >
+                      <div className="relative aspect-video bg-gray-200 dark:bg-gray-700 overflow-hidden">
+                        <img
+                          src={`/api/files/${photo.filePath}`}
+                          alt="Trip photo"
+                          className="h-full w-full object-cover cursor-zoom-in"
+                          onClick={() => handleOpenPhoto(photo)}
+                        />
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => togglePhotoSelection(photo.id)}
+                          onClick={(event) => event.stopPropagation()}
+                          className="absolute left-3 top-3 h-4 w-4 accent-blue-600"
+                        />
+                      </div>
+                      <div className="space-y-2 p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="text-sm font-semibold text-gray-900 dark:text-white">
+                              {photo.uploader.name}
+                            </p>
+                            <p className="text-xs text-gray-500 dark:text-gray-400">
+                              {new Date(photo.createdAt).toLocaleString()}
+                            </p>
+                          </div>
+                          <button
+                            onClick={() => handleDownloadSinglePhoto(photo)}
+                            className="text-xs text-blue-600 hover:text-blue-700"
+                          >
+                            {t('trip.photos.downloadSingle')}
+                          </button>
+                        </div>
+                        <div className="flex flex-wrap gap-2 text-xs">
+                          {photo.tags && photo.tags.length > 0 ? (
+                            photo.tags.map((tag) => (
+                              <span
+                                key={`${photo.id}-${tag}`}
+                                className="rounded-full bg-blue-100 px-2 py-0.5 text-blue-700"
+                              >
+                                #{tag}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="text-gray-400">{t('trip.photos.noTags')}</span>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => handleOpenPhoto(photo)}
+                          className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                        >
+                          {t('trip.photos.viewDetails')}
+                        </button>
+                      </div>
                     </div>
-                    <div className="p-3">
-                      <p className="text-xs text-gray-600 dark:text-gray-400 mb-1">
-                        {photo.uploader.name}
-                      </p>
-                      <p className="text-xs text-gray-500 dark:text-gray-500">
-                        {new Date(photo.createdAt).toLocaleDateString()}
-                      </p>
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
         )}
 
+        {activePhoto && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+            <div className="relative w-full max-w-5xl rounded-2xl bg-white p-6 shadow-xl dark:bg-gray-900">
+              <button
+                onClick={handleClosePhotoModal}
+                className="absolute right-4 top-4 text-gray-400 hover:text-gray-600"
+              >
+                ✕
+              </button>
+              <div className="grid gap-6 md:grid-cols-2">
+                <div className="space-y-4">
+                  <div className="flex h-80 items-center justify-center overflow-hidden rounded-xl bg-black">
+                    <img
+                      src={`/api/files/${activePhoto.filePath}`}
+                      alt="Selected photo"
+                      style={{ transform: `scale(${photoZoom})`, transformOrigin: 'center center' }}
+                      className="max-h-full"
+                    />
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 text-sm text-gray-600 dark:text-gray-300">
+                    <span>
+                      {t('trip.photos.zoomLabel', {
+                        percent: Math.round(photoZoom * 100),
+                      })}
+                    </span>
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => adjustPhotoZoom(-0.25)}
+                        className="rounded-lg border border-gray-300 px-3 py-1 hover:bg-gray-100"
+                      >
+                        -
+                      </button>
+                      <button
+                        onClick={() => adjustPhotoZoom(0.25)}
+                        className="rounded-lg border border-gray-300 px-3 py-1 hover:bg-gray-100"
+                      >
+                        +
+                      </button>
+                      <button
+                        onClick={() => setPhotoZoom(1)}
+                        className="rounded-lg border border-gray-300 px-3 py-1 hover:bg-gray-100"
+                      >
+                        {t('trip.photos.resetZoom')}
+                      </button>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleDownloadSinglePhoto(activePhoto)}
+                    className="w-full rounded-lg bg-blue-600 py-2 text-white hover:bg-blue-700"
+                  >
+                    {t('trip.photos.downloadOriginal')}
+                  </button>
+                </div>
+                <div className="space-y-5">
+                  <div>
+                    <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                      {activePhoto.uploader.name}
+                    </h3>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      {t('trip.photos.uploadedAt', {
+                        timestamp: new Date(activePhoto.createdAt).toLocaleString(),
+                      })}
+                    </p>
+                    <p className="text-sm text-gray-500 dark:text-gray-400">
+                      {t('trip.photos.resolution', {
+                        resolution:
+                          activePhoto.width && activePhoto.height
+                            ? `${activePhoto.width}×${activePhoto.height}`
+                            : t('trip.photos.resolutionUnknown'),
+                      })}
+                    </p>
+                  </div>
+
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-900 dark:text-white">
+                      {t('trip.photos.tagsTitle')}
+                    </h4>
+                    <div className="mt-2 flex flex-wrap gap-2">
+                      {activePhoto.tags && activePhoto.tags.length > 0 ? (
+                        activePhoto.tags.map((tag) => (
+                          <span
+                            key={`${activePhoto.id}-${tag}`}
+                            className="inline-flex items-center gap-1 rounded-full bg-blue-100 px-3 py-1 text-xs font-medium text-blue-800"
+                          >
+                            #{tag}
+                            <button
+                              onClick={() => handleRemoveTag(tag)}
+                              className="text-blue-500 hover:text-blue-700"
+                            >
+                              ×
+                            </button>
+                          </span>
+                        ))
+                      ) : (
+                        <span className="text-sm text-gray-400">{t('trip.photos.noTags')}</span>
+                      )}
+                    </div>
+                    <div className="mt-3 flex gap-2">
+                      <input
+                        type="text"
+                        value={photoTagInput}
+                        onChange={(event) => setPhotoTagInput(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            event.preventDefault();
+                            handleAddTag();
+                          }
+                        }}
+                        className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                        placeholder={t('trip.photos.addTagPlaceholder')}
+                      />
+                      <button
+                        onClick={handleAddTag}
+                        className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+                      >
+                        {t('trip.photos.addTag')}
+                      </button>
+                    </div>
+                    {photoUpdateError && (
+                      <p className="mt-2 text-sm text-red-500">{photoUpdateError}</p>
+                    )}
+                  </div>
+
+                  <div>
+                    <h4 className="text-sm font-semibold text-gray-900 dark:text-white">
+                      {t('trip.photos.metadataTitle')}
+                    </h4>
+                    {(() => {
+                      const entries = getExifEntries(activePhoto);
+                      if (entries.length === 0) {
+                        return (
+                          <p className="mt-2 text-sm text-gray-500 dark:text-gray-400">
+                            {t('trip.photos.noMetadata')}
+                          </p>
+                        );
+                      }
+                      return (
+                        <dl className="mt-2 grid grid-cols-1 gap-y-2 text-sm">
+                          {entries.map(([key, value]) => (
+                            <div key={key} className="flex justify-between gap-3">
+                              <dt className="font-medium text-gray-600 dark:text-gray-400">
+                                {key}
+                              </dt>
+                              <dd className="text-gray-900 dark:text-gray-200">
+                                {String(value)}
+                              </dd>
+                            </div>
+                          ))}
+                        </dl>
+                      );
+                    })()}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* Participants Tab */}
         {activeTab === 'participants' && (
-          <div>
-            <div className="mb-6 flex justify-between items-center">
-              <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
-                Trip Participants
-              </h2>
-              <button
-                onClick={() => {
-                  setShowAddParticipantModal(true);
-                  fetchAvailableHouseholds();
-                }}
-                className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-              >
-                + Add Participant
-              </button>
+          <div className="space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h2 className="text-xl font-semibold text-gray-900 dark:text-white">
+                  {t('trip.participants.title')}
+                </h2>
+                <p className="text-sm text-gray-600 dark:text-gray-400">
+                  {t('trip.participants.subtitle')}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={handleCreateGroup}
+                  className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                >
+                  {t('trip.participants.newGroup')}
+                </button>
+                <button
+                  onClick={() => {
+                    setShowAddParticipantModal(true);
+                    fetchAvailableHouseholds();
+                    setParticipantError('');
+                    setAddParticipantMode('existing');
+                    setInviteEmail('');
+                    setInviteName('');
+                    setInviteWeight(1);
+                    setSelectedHousehold('');
+                    setParticipantWeight(1.0);
+                  }}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+                >
+                  {t('trip.participants.addParticipant')}
+                </button>
+              </div>
             </div>
 
             {participants.length === 0 ? (
-              <div className="text-center py-12 bg-white dark:bg-gray-800 rounded-lg shadow">
-                <p className="text-gray-600 dark:text-gray-400 mb-4">
-                  No participants added yet
-                </p>
+              <div className="rounded-lg bg-white py-12 text-center shadow dark:bg-gray-800">
+                <p className="text-gray-600 dark:text-gray-400">{t('trip.participants.none')}</p>
               </div>
             ) : (
-              <div className="bg-white dark:bg-gray-800 rounded-lg shadow overflow-hidden">
-                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
-                  <thead className="bg-gray-50 dark:bg-gray-700">
-                    <tr>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                        Members
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                        Household
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                        Household Type
-                      </th>
-                      <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                        Weight
-                      </th>
-                      <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
-                        Actions
-                      </th>
-                    </tr>
-                  </thead>
-                  <tbody className="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
-                    {participants.map((participant) => (
-                      <tr key={participant.id}>
-                        <td className="px-6 py-4">
-                          {participant.household.members.map((member, idx) => (
-                            <div key={member.id} className={idx > 0 ? 'mt-2' : ''}>
-                              <div className="text-sm font-medium text-gray-900 dark:text-white">
-                                {member.user.name || 'Unknown'}
+              <div className="space-y-5">
+                {groups.map((group) => (
+                  <div
+                    key={group.id}
+                    className="rounded-2xl border border-gray-200 bg-white shadow dark:border-gray-700 dark:bg-gray-800"
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-4 py-3 dark:border-gray-700">
+                      <div>
+                        <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                          {group.name}
+                        </h3>
+                        <p className="text-xs text-gray-500 dark:text-gray-400">
+                          {t('trip.participants.householdCount', {
+                            count: group.householdIds.length,
+                          })}
+                        </p>
+                      </div>
+                      {group.id !== 'group-ungrouped' && (
+                        <div className="flex gap-2 text-sm">
+                          <button
+                            onClick={() => handleRenameGroup(group.id)}
+                            className="rounded-lg border border-gray-300 px-3 py-1 text-gray-600 hover:bg-gray-100"
+                          >
+                            {t('trip.participants.rename')}
+                          </button>
+                          <button
+                            onClick={() => handleDeleteGroup(group.id)}
+                            className="rounded-lg border border-red-200 px-3 py-1 text-red-500 hover:bg-red-50"
+                          >
+                            {t('trip.participants.delete')}
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                    <div
+                      className="flex flex-wrap gap-3 px-4 py-4 min-h-[120px]"
+                      onDragOver={handleGroupDragOver}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        const householdId = event.dataTransfer.getData('text/plain');
+                        if (householdId) {
+                          handleHouseholdDrop(group.id, householdId);
+                        }
+                      }}
+                    >
+                      {group.householdIds.length === 0 ? (
+                        <p className="text-sm text-gray-400">
+                          {t('trip.participants.dragHere')}
+                        </p>
+                      ) : (
+                        group.householdIds.map((householdId) => {
+                          const participant = householdMap.get(householdId);
+                          if (!participant) return null;
+                          return (
+                            <div
+                              key={participant.id}
+                              draggable
+                              onDragStart={(event) =>
+                                handleHouseholdDragStart(event, participant.householdId)
+                              }
+                              className="w-full max-w-xs cursor-grab rounded-xl border border-gray-200 bg-white p-4 shadow-sm transition hover:shadow-md dark:border-gray-700 dark:bg-gray-900"
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div>
+                                  <p className="text-sm font-semibold text-gray-900 dark:text-white">
+                                    {participant.household.displayName}
+                                  </p>
+                                  <p className="text-xs text-gray-500 dark:text-gray-400">
+                                    {t('trip.participants.weight', {
+                                      weight: participant.weight.toFixed(1),
+                                    })}
+                                  </p>
+                                </div>
+                                <button
+                                  onClick={() => handleRemoveParticipant(participant.id)}
+                                  className="text-xs text-red-500 hover:text-red-700"
+                                >
+                                  {t('trip.participants.remove')}
+                                </button>
                               </div>
-                              <div className="text-sm text-gray-500 dark:text-gray-400">
-                                {member.user.email}
+                              <div className="mt-3 flex -space-x-2">
+                                {participant.household.members.length > 0 ? (
+                                  participant.household.members.map((member) => (
+                                    <div
+                                      key={member.id}
+                                      className="flex h-8 w-8 items-center justify-center rounded-full border border-white bg-blue-100 text-xs font-medium text-blue-700 dark:border-gray-900 dark:bg-blue-900 dark:text-blue-100"
+                                      title={member.user.email}
+                                    >
+                                      {(member.user.name || member.user.email)[0]?.toUpperCase()}
+                                    </div>
+                                  ))
+                                ) : (
+                                  <span className="text-xs text-gray-400">
+                                    {t('trip.participants.waitingMembers')}
+                                  </span>
+                                )}
                               </div>
                             </div>
-                          ))}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                          {participant.household.displayName}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <span
-                            className={`px-2 inline-flex text-xs leading-5 font-semibold rounded-full ${
-                              participant.weight === 0.5
-                                ? 'bg-purple-100 text-purple-800'
-                                : 'bg-blue-100 text-blue-800'
-                            }`}
-                          >
-                            {participant.weight === 0.5 ? 'Kid (0.5x)' : 'Adult (1.0x)'}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 dark:text-white">
-                          {participant.weight.toFixed(1)}
-                        </td>
-                        <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                          <button
-                            onClick={() => handleRemoveParticipant(participant.id)}
-                            className="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300"
-                          >
-                            Remove
-                          </button>
-                        </td>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {invites.length > 0 && (
+              <div className="rounded-2xl border border-gray-200 bg-white shadow dark:border-gray-700 dark:bg-gray-800">
+                <div className="border-b border-gray-200 px-4 py-3 dark:border-gray-700">
+                  <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
+                    {t('trip.participants.pendingInvites')}
+                  </h3>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-gray-200 text-sm dark:divide-gray-700">
+                    <thead className="bg-gray-50 dark:bg-gray-700">
+                      <tr>
+                        <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">
+                          {t('trip.participants.table.email')}
+                        </th>
+                        <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">
+                          {t('trip.participants.table.household')}
+                        </th>
+                        <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">
+                          {t('trip.participants.table.expires')}
+                        </th>
+                        <th className="px-4 py-2 text-left font-medium text-gray-600 dark:text-gray-300">
+                          {t('trip.participants.table.status')}
+                        </th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
+                    </thead>
+                    <tbody className="divide-y divide-gray-200 bg-white dark:divide-gray-700 dark:bg-gray-800">
+                      {invites.map((invite) => (
+                        <tr key={invite.id}>
+                          <td className="px-4 py-2 text-gray-900 dark:text-white">
+                            {invite.email || '—'}
+                          </td>
+                          <td className="px-4 py-2 text-gray-700 dark:text-gray-300">
+                            {invite.household?.displayName || '—'}
+                          </td>
+                          <td className="px-4 py-2 text-gray-700 dark:text-gray-300">
+                            {new Date(invite.expiresAt).toLocaleDateString()}
+                          </td>
+                          <td className="px-4 py-2">
+                            <span
+                              className={`rounded-full px-2 py-1 text-xs font-semibold ${
+                                invite.used > 0
+                                  ? 'bg-emerald-100 text-emerald-700'
+                                  : 'bg-yellow-100 text-yellow-700'
+                              }`}
+                            >
+                              {invite.used > 0
+                                ? t('trip.participants.joined')
+                                : t('trip.participants.pending')}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
           </div>
@@ -733,67 +1968,170 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
       {/* Add Participant Modal */}
       {showAddParticipantModal && (
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
-          <div className="bg-white dark:bg-gray-800 rounded-lg max-w-md w-full p-6">
-            <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">
-              Add Participant
-            </h3>
-            <form onSubmit={handleAddParticipant} className="space-y-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Select Household
-                </label>
-                <select
-                  value={selectedHousehold}
-                  onChange={(e) => setSelectedHousehold(e.target.value)}
-                  required
-                  className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-                >
-                  <option value="">Choose a household...</option>
-                  {availableHouseholds.map((household) => (
-                    <option key={household.id} value={household.id}>
-                      {household.displayName}
-                    </option>
-                  ))}
-                </select>
-              </div>
+          <div className="bg-white dark:bg-gray-800 rounded-2xl max-w-lg w-full p-6 shadow-xl">
+            <div className="mb-4 flex items-center justify-between">
+              <h3 className="text-2xl font-bold text-gray-900 dark:text-white">
+                {t('trip.participants.manage')}
+              </h3>
+              <button
+                onClick={handleCloseParticipantModal}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                ✕
+              </button>
+            </div>
 
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Weight (0.5 for kids, 1.0 for adults)
-                </label>
-                <input
-                  type="number"
-                  step="0.1"
-                  min="0"
-                  max="2"
-                  value={participantWeight}
-                  onChange={(e) => setParticipantWeight(parseFloat(e.target.value))}
-                  required
-                  className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-                />
-              </div>
+            <div className="mb-4 flex gap-2">
+              <button
+                type="button"
+                onClick={() => setAddParticipantMode('existing')}
+                className={`flex-1 rounded-lg px-4 py-2 text-sm font-medium ${
+                  addParticipantMode === 'existing'
+                    ? 'bg-blue-600 text-white'
+                    : 'border border-gray-300 text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                {t('trip.participants.assignExisting')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setAddParticipantMode('invite')}
+                className={`flex-1 rounded-lg px-4 py-2 text-sm font-medium ${
+                  addParticipantMode === 'invite'
+                    ? 'bg-blue-600 text-white'
+                    : 'border border-gray-300 text-gray-600 hover:bg-gray-100'
+                }`}
+              >
+                {t('trip.participants.inviteByEmail')}
+              </button>
+            </div>
 
-              <div className="flex gap-3 pt-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowAddParticipantModal(false);
-                    setSelectedHousehold('');
-                    setParticipantWeight(1.0);
-                  }}
-                  className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={addingParticipant}
-                  className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {addingParticipant ? 'Adding...' : 'Add'}
-                </button>
+            {participantError && (
+              <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-600">
+                {participantError}
               </div>
-            </form>
+            )}
+
+            {addParticipantMode === 'existing' ? (
+              <form onSubmit={handleAddParticipant} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    {t('trip.participants.selectHousehold')}
+                  </label>
+                  <select
+                    value={selectedHousehold}
+                    onChange={(e) => setSelectedHousehold(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                  >
+                    <option value="">{t('trip.participants.chooseHousehold')}</option>
+                    {availableHouseholds.map((household) => (
+                      <option key={household.id} value={household.id}>
+                        {household.displayName}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    {t('trip.participants.weightHint')}
+                  </label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="2"
+                    value={participantWeight}
+                    onChange={(e) => setParticipantWeight(parseFloat(e.target.value))}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                  />
+                </div>
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleCloseParticipantModal}
+                    className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700"
+                  >
+                    {t('trip.settlements.cancel')}
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={addingParticipant}
+                    className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {addingParticipant ? t('trip.participants.assigning') : t('trip.participants.assign')}
+                  </button>
+                </div>
+              </form>
+            ) : (
+              <form onSubmit={handleCreateInvite} className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    {t('trip.participants.inviteeEmail')}
+                  </label>
+                  <input
+                    type="email"
+                    value={inviteEmail}
+                    onChange={(event) => setInviteEmail(event.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                    placeholder={t('trip.participants.inviteEmailPlaceholder')}
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    {t('trip.participants.householdNickname')}
+                  </label>
+                  <input
+                    type="text"
+                    value={inviteName}
+                    onChange={(event) => setInviteName(event.target.value)}
+                    className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                    placeholder="Smith family"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    {t('trip.participants.initialWeight')}
+                  </label>
+                  <input
+                    type="number"
+                    step="0.1"
+                    min="0"
+                    max="2"
+                    value={inviteWeight}
+                    onChange={(event) => {
+                      const value = parseFloat(event.target.value);
+                      setInviteWeight(Number.isNaN(value) ? 1 : value);
+                    }}
+                    className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                  />
+                </div>
+                <p className="text-xs text-gray-500 dark:text-gray-400">
+                  {t('trip.participants.inviteHint')}
+                </p>
+
+                <div className="flex gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleCloseParticipantModal}
+                    className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700"
+                  >
+                    {t('trip.settlements.cancel')}
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={creatingInvite}
+                    className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
+                  >
+                    {creatingInvite ? t('trip.participants.sending') : t('trip.participants.sendInvite')}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </div>
       )}

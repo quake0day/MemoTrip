@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { useI18n } from '../providers';
 
 interface Trip {
   id: string;
@@ -24,6 +25,7 @@ interface User {
 
 export default function DashboardPage() {
   const router = useRouter();
+  const { t } = useI18n();
   const [user, setUser] = useState<User | null>(null);
   const [trips, setTrips] = useState<Trip[]>([]);
   const [loading, setLoading] = useState(true);
@@ -31,6 +33,18 @@ export default function DashboardPage() {
   const [newTripName, setNewTripName] = useState('');
   const [newTripCurrency, setNewTripCurrency] = useState('USD');
   const [creating, setCreating] = useState(false);
+
+  const fetchTrips = useCallback(async (userId: string) => {
+    try {
+      const response = await fetch(`/api/trips?userId=${userId}`);
+      const data = await response.json();
+      setTrips(data.trips || []);
+    } catch (error) {
+      console.error(t('dashboard.errorLoadTrips'), error);
+    } finally {
+      setLoading(false);
+    }
+  }, [t]);
 
   useEffect(() => {
     const userData = localStorage.getItem('user');
@@ -42,19 +56,7 @@ export default function DashboardPage() {
     const parsedUser = JSON.parse(userData);
     setUser(parsedUser);
     fetchTrips(parsedUser.id);
-  }, [router]);
-
-  const fetchTrips = async (userId: string) => {
-    try {
-      const response = await fetch(`/api/trips?userId=${userId}`);
-      const data = await response.json();
-      setTrips(data.trips || []);
-    } catch (error) {
-      console.error('Failed to fetch trips:', error);
-    } finally {
-      setLoading(false);
-    }
-  };
+  }, [router, fetchTrips]);
 
   const handleCreateTrip = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -79,7 +81,7 @@ export default function DashboardPage() {
         fetchTrips(user.id);
       }
     } catch (error) {
-      console.error('Failed to create trip:', error);
+      console.error(t('dashboard.errorCreateTrip'), error);
     } finally {
       setCreating(false);
     }
@@ -93,7 +95,7 @@ export default function DashboardPage() {
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
-        <div className="text-xl">Loading...</div>
+        <div className="text-xl">{t('dashboard.loading')}</div>
       </div>
     );
   }
@@ -106,17 +108,17 @@ export default function DashboardPage() {
           <div className="flex justify-between items-center">
             <div>
               <h1 className="text-2xl font-bold text-gray-900 dark:text-white">
-                MemoTrip
+                {t('dashboard.brand')}
               </h1>
               <p className="text-sm text-gray-600 dark:text-gray-400">
-                Welcome back, {user?.name}
+                {t('dashboard.welcome', { name: user?.name ?? '' })}
               </p>
             </div>
             <button
               onClick={handleLogout}
               className="px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white"
             >
-              Logout
+              {t('dashboard.logout')}
             </button>
           </div>
         </div>
@@ -126,26 +128,26 @@ export default function DashboardPage() {
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="flex justify-between items-center mb-6">
           <h2 className="text-3xl font-bold text-gray-900 dark:text-white">
-            Your Trips
+            {t('dashboard.title')}
           </h2>
           <button
             onClick={() => setShowCreateModal(true)}
             className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
           >
-            + New Trip
+            {t('dashboard.newTripButton')}
           </button>
         </div>
 
         {trips.length === 0 ? (
           <div className="text-center py-12 bg-white dark:bg-gray-800 rounded-lg shadow">
             <p className="text-gray-600 dark:text-gray-400 mb-4">
-              You haven&apos;t created any trips yet
+              {t('dashboard.emptyState')}
             </p>
             <button
               onClick={() => setShowCreateModal(true)}
               className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
             >
-              Create Your First Trip
+              {t('dashboard.emptyStateCta')}
             </button>
           </div>
         ) : (
@@ -160,10 +162,10 @@ export default function DashboardPage() {
                   {trip.name}
                 </h3>
                 <div className="space-y-2 text-sm text-gray-600 dark:text-gray-400">
-                  <p>Currency: {trip.currency}</p>
+                  <p>{t('dashboard.card.currency', { currency: trip.currency })}</p>
                   <div className="flex gap-4 pt-2">
-                    <span>{trip._count.receipts} receipts</span>
-                    <span>{trip._count.photos} photos</span>
+                    <span>{t('dashboard.card.receipts', { count: trip._count.receipts })}</span>
+                    <span>{t('dashboard.card.photos', { count: trip._count.photos })}</span>
                   </div>
                 </div>
               </Link>
@@ -177,12 +179,12 @@ export default function DashboardPage() {
         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center p-4 z-50">
           <div className="bg-white dark:bg-gray-800 rounded-lg max-w-md w-full p-6">
             <h3 className="text-2xl font-bold text-gray-900 dark:text-white mb-4">
-              Create New Trip
+              {t('dashboard.modal.title')}
             </h3>
             <form onSubmit={handleCreateTrip} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Trip Name
+                  {t('dashboard.modal.nameLabel')}
                 </label>
                 <input
                   type="text"
@@ -190,13 +192,13 @@ export default function DashboardPage() {
                   onChange={(e) => setNewTripName(e.target.value)}
                   required
                   className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-                  placeholder="Summer Vacation 2025"
+                  placeholder={t('dashboard.modal.namePlaceholder')}
                 />
               </div>
 
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                  Currency
+                  {t('dashboard.modal.currencyLabel')}
                 </label>
                 <select
                   value={newTripCurrency}
@@ -217,14 +219,14 @@ export default function DashboardPage() {
                   onClick={() => setShowCreateModal(false)}
                   className="flex-1 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50 dark:border-gray-600 dark:hover:bg-gray-700"
                 >
-                  Cancel
+                  {t('dashboard.modal.cancel')}
                 </button>
                 <button
                   type="submit"
                   disabled={creating}
                   className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
                 >
-                  {creating ? 'Creating...' : 'Create'}
+                  {creating ? t('dashboard.modal.creating') : t('dashboard.modal.create')}
                 </button>
               </div>
             </form>
