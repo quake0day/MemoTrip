@@ -10,10 +10,16 @@ export async function POST(
     const { tripId } = await params;
     const formData = await request.formData();
     const file = formData.get('file') as File;
-    const uploaderId = formData.get('uploaderId') as string;
+    const uploaderId =
+      (formData.get('uploaderId') as string) ||
+      (formData.get('userId') as string);
 
     if (!file) {
       return NextResponse.json({ error: 'No file uploaded' }, { status: 400 });
+    }
+
+    if (!uploaderId) {
+      return NextResponse.json({ error: 'Uploader ID required' }, { status: 400 });
     }
 
     const bytes = await file.arrayBuffer();
