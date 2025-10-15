@@ -1,0 +1,2 @@
+ALTER TABLE "household_members"
+ADD COLUMN "weight" DOUBLE PRECISION NOT NULL DEFAULT 1.0;

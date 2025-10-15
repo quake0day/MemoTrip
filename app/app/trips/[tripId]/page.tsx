@@ -2,7 +2,7 @@
 
 /* eslint-disable @next/next/no-img-element */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import JSZip from 'jszip';
@@ -41,6 +41,8 @@ interface Participant {
     displayName: string;
     members: Array<{
       id: string;
+      weight: number;
+      role: 'OWNER' | 'MEMBER';
       user: {
         id: string;
         name: string;
@@ -91,12 +93,6 @@ interface Invite {
   } | null;
 }
 
-interface ParticipantGroup {
-  id: string;
-  name: string;
-  householdIds: string[];
-}
-
 type TabType = 'receipts' | 'settlements' | 'photos' | 'participants';
 
 export default function TripDetailPage({ params }: { params: Promise<{ tripId: string }> }) {
@@ -118,6 +114,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
   // Upload states
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
+  const [deletingPhotoId, setDeletingPhotoId] = useState<string | null>(null);
 
   // Settlement editing states
   const [editingSettlement, setEditingSettlement] = useState<Settlement | null>(null);
@@ -126,23 +123,17 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
 
   // Participant management states
   const [showAddParticipantModal, setShowAddParticipantModal] = useState(false);
-  const [availableHouseholds, setAvailableHouseholds] = useState<Array<{
-    id: string;
-    displayName: string;
-  }>>([]);
-  const [selectedHousehold, setSelectedHousehold] = useState('');
-  const [participantWeight, setParticipantWeight] = useState(1.0);
-  const [addingParticipant, setAddingParticipant] = useState(false);
   const [participantError, setParticipantError] = useState('');
-  const [addParticipantMode, setAddParticipantMode] = useState<'existing' | 'invite'>('existing');
+  const [addParticipantMode, setAddParticipantMode] = useState<'member' | 'invite'>('member');
+  const [newMemberName, setNewMemberName] = useState('');
+  const [newMemberEmail, setNewMemberEmail] = useState('');
+  const [newMemberHouseholdId, setNewMemberHouseholdId] = useState('');
+  const [newMemberWeight, setNewMemberWeight] = useState(1);
+  const [addingParticipant, setAddingParticipant] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteName, setInviteName] = useState('');
   const [inviteWeight, setInviteWeight] = useState(1);
   const [creatingInvite, setCreatingInvite] = useState(false);
-
-  // Grouping state
-  const [groups, setGroups] = useState<ParticipantGroup[]>([]);
-  const groupsInitializedRef = useRef(false);
 
   // Photo interaction states
   const [selectedPhotos, setSelectedPhotos] = useState<Set<string>>(new Set());
@@ -154,18 +145,13 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
   const [receiptAssignments, setReceiptAssignments] = useState<Record<string, string[]>>({});
   const [photoAssignments, setPhotoAssignments] = useState<Record<string, string[]>>({});
 
-  const groupsStorageKey = useMemo(
-    () => (tripId ? `trip-groups-${tripId}` : null),
-    [tripId]
-  );
-
   const receiptAssignmentsStorageKey = useMemo(
     () => (tripId ? `trip-${tripId}-receipt-households` : null),
     [tripId]
   );
 
   const photoAssignmentsStorageKey = useMemo(
-    () => (tripId ? `trip-${tripId}-photo-households` : null),
+    () => (tripId ? `trip-${tripId}-photo-members` : null),
     [tripId]
   );
 
@@ -232,84 +218,6 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
     },
     [extractNumericValue]
   );
-
-  const persistGroups = useCallback(
-    (nextGroups: ParticipantGroup[]) => {
-      if (!groupsStorageKey) return;
-      localStorage.setItem(groupsStorageKey, JSON.stringify(nextGroups));
-    },
-    [groupsStorageKey]
-  );
-
-  useEffect(() => {
-    if (!groupsStorageKey || groupsInitializedRef.current) return;
-    const stored = localStorage.getItem(groupsStorageKey);
-    if (stored) {
-      try {
-        const parsed = JSON.parse(stored) as ParticipantGroup[];
-        if (Array.isArray(parsed)) {
-          setGroups(parsed);
-        } else {
-          setGroups([{ id: 'group-ungrouped', name: '未分组', householdIds: [] }]);
-        }
-      } catch (error) {
-        console.warn('Failed to parse stored groups', error);
-        setGroups([{ id: 'group-ungrouped', name: '未分组', householdIds: [] }]);
-      }
-    } else {
-      setGroups([{ id: 'group-ungrouped', name: '未分组', householdIds: [] }]);
-    }
-    groupsInitializedRef.current = true;
-  }, [groupsStorageKey]);
-
-  useEffect(() => {
-    if (!groupsInitializedRef.current) {
-      return;
-    }
-
-    if (participants.length === 0) {
-      const emptyGroups: ParticipantGroup[] = [
-        { id: 'group-ungrouped', name: '未分组', householdIds: [] },
-      ];
-      setGroups(emptyGroups);
-      persistGroups(emptyGroups);
-      return;
-    }
-
-    setGroups(prevGroups => {
-      const participantIds = new Set(participants.map(p => p.householdId));
-      const sanitized = prevGroups.map(group => ({
-        ...group,
-        householdIds: group.householdIds.filter(id => participantIds.has(id)),
-      }));
-
-      let ungrouped = sanitized.find(group => group.id === 'group-ungrouped');
-      const otherGroups = sanitized
-        .filter(group => group.id !== 'group-ungrouped')
-        .map(group => ({ ...group }));
-
-      if (!ungrouped) {
-        ungrouped = { id: 'group-ungrouped', name: '未分组', householdIds: [] };
-      } else {
-        ungrouped = { ...ungrouped };
-      }
-
-      const assigned = new Set<string>();
-      otherGroups.forEach(group => {
-        group.householdIds.forEach(id => assigned.add(id));
-      });
-
-      participantIds.forEach(id => {
-        if (!assigned.has(id) && !ungrouped!.householdIds.includes(id)) {
-          ungrouped!.householdIds = [...ungrouped!.householdIds, id];
-        }
-      });
-
-      const nextGroups = [ungrouped!, ...otherGroups];
-      persistGroups(nextGroups);
-      return nextGroups;
-    });
-  }, [participants, persistGroups]);
 
   useEffect(() => {
     if (!receiptAssignmentsStorageKey) {
@@ -389,6 +297,11 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
     }
 
     const validHouseholds = new Set(participants.map(participant => participant.householdId));
+    const validMemberIds = new Set(
+      participants.flatMap(participant =>
+        participant.household.members.map(member => member.id)
+      )
+    );
 
     setReceiptAssignments(prev => {
       let changed = false;
@@ -413,14 +326,14 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
       let changed = false;
       const next: Record<string, string[]> = {};
 
-      Object.entries(prev).forEach(([photoId, householdIds]) => {
-        const filtered = householdIds.filter(id => validHouseholds.has(id));
-        if (filtered.length !== householdIds.length) {
+      Object.entries(prev).forEach(([photoId, memberIds]) => {
+        const filtered = memberIds.filter(id => validMemberIds.has(id));
+        if (filtered.length !== memberIds.length) {
           changed = true;
         }
         if (filtered.length > 0) {
           next[photoId] = filtered;
-        } else if (householdIds.length > 0) {
+        } else if (memberIds.length > 0) {
           changed = true;
         }
       });
@@ -663,47 +576,43 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
     }
   };
 
-  const fetchAvailableHouseholds = async () => {
-    if (!user) return;
-
-    try {
-      const res = await fetch(`/api/households?userId=${user.id}`);
-      const data = await res.json();
-      const participantIds = new Set(participants.map(p => p.householdId));
-      const filtered = (data.households || []).filter(
-        (household: { id: string }) => !participantIds.has(household.id)
-      );
-      setAvailableHouseholds(filtered);
-    } catch (error) {
-      console.error('Failed to fetch households:', error);
-    }
-  };
-
-  const handleAddParticipant = async (e: React.FormEvent) => {
+  const handleCreateMember = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!selectedHousehold) return;
+    if (!newMemberHouseholdId) {
+      setParticipantError(t('trip.participants.errorNoHousehold'));
+      return;
+    }
+
+    if (!newMemberName.trim() || !newMemberEmail.trim()) {
+      setParticipantError(t('trip.participants.errorMissingMemberFields'));
+      return;
+    }
 
     setParticipantError('');
     setAddingParticipant(true);
     try {
-      const res = await fetch(`/api/trips/${tripId}/participants`, {
+      const res = await fetch(`/api/trips/${tripId}/participants/members`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          householdId: selectedHousehold,
-          weight: participantWeight,
+          householdId: newMemberHouseholdId,
+          name: newMemberName,
+          email: newMemberEmail,
+          weight: newMemberWeight,
         }),
       });
 
       if (!res.ok) {
         const error = await res.json();
-        throw new Error(error.error || 'Failed to add participant');
+        throw new Error(error.error || 'Failed to create member');
       }
 
       await fetchParticipants(tripId);
       setShowAddParticipantModal(false);
-      setSelectedHousehold('');
-      setParticipantWeight(1.0);
+      setNewMemberName('');
+      setNewMemberEmail('');
+      setNewMemberHouseholdId('');
+      setNewMemberWeight(1);
     } catch (error: any) {
       setParticipantError(error.message);
     } finally {
@@ -751,10 +660,12 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
 
   const handleCloseParticipantModal = () => {
     setShowAddParticipantModal(false);
-    setSelectedHousehold('');
-    setParticipantWeight(1.0);
     setParticipantError('');
-    setAddParticipantMode('existing');
+    setAddParticipantMode('member');
+    setNewMemberName('');
+    setNewMemberEmail('');
+    setNewMemberHouseholdId('');
+    setNewMemberWeight(1);
     setInviteEmail('');
     setInviteName('');
     setInviteWeight(1);
@@ -780,103 +691,32 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
     [participants]
   );
 
-  const handleCreateGroup = () => {
-    const name = prompt('输入新的家庭名称');
-    if (!name) return;
+  const sortedMembers = useMemo(() => {
+    const members = sortedParticipants.flatMap(participant =>
+      participant.household.members.map(member => ({
+        id: member.id,
+        weight: member.weight ?? 1,
+        name: member.user.name || member.user.email,
+        email: member.user.email,
+        householdId: participant.householdId,
+        householdName: participant.household.displayName,
+      }))
+    );
 
-    setGroups(prev => {
-      const next = [
-        ...prev,
-        { id: `group-${Date.now()}`, name, householdIds: [] },
-      ];
-      persistGroups(next);
-      return next;
-    });
-  };
+    return members.sort((a, b) =>
+      a.name.localeCompare(b.name, undefined, { sensitivity: 'base' })
+    );
+  }, [sortedParticipants]);
 
-  const handleRenameGroup = (groupId: string) => {
-    const group = groups.find(g => g.id === groupId);
-    if (!group) return;
-    const name = prompt('更新家庭名称', group.name);
-    if (!name) return;
-
-    setGroups(prev => {
-      const next = prev.map(g =>
-        g.id === groupId
-          ? { ...g, name }
-          : g
-      );
-      persistGroups(next);
-      return next;
-    });
-  };
-
-  const handleDeleteGroup = (groupId: string) => {
-    if (groupId === 'group-ungrouped') return;
-    if (!confirm('确认删除这个家庭？成员会移动到未分组。')) return;
-
-    setGroups(prev => {
-      const groupToDelete = prev.find(group => group.id === groupId);
-      const remaining = prev.filter(group => group.id !== groupId);
-      const ungroupedIndex = remaining.findIndex(group => group.id === 'group-ungrouped');
-
-      if (groupToDelete && groupToDelete.householdIds.length > 0) {
-        if (ungroupedIndex >= 0) {
-          const ungrouped = {
-            ...remaining[ungroupedIndex],
-            householdIds: [
-              ...remaining[ungroupedIndex].householdIds,
-              ...groupToDelete.householdIds,
-            ],
-          };
-          remaining[ungroupedIndex] = ungrouped;
-        } else {
-          remaining.unshift({
-            id: 'group-ungrouped',
-            name: '未分组',
-            householdIds: [...groupToDelete.householdIds],
-          });
-        }
-      }
-
-      persistGroups(remaining);
-      return remaining;
-    });
-  };
-
-  const handleHouseholdDrop = (groupId: string, householdId: string) => {
-    setGroups(prev => {
-      const next = prev.map(group => ({
-        ...group,
-        householdIds: group.householdIds.filter(id => id !== householdId),
-      }));
-
-      const index = next.findIndex(group => group.id === groupId);
-      if (index >= 0) {
-        const targetGroup = next[index];
-        next[index] = {
-          ...targetGroup,
-          householdIds: targetGroup.householdIds.includes(householdId)
-            ? targetGroup.householdIds
-            : [...targetGroup.householdIds, householdId],
-        };
-      }
-
-      persistGroups(next);
-      return next;
-    });
-  };
-
-  const handleGroupDragOver = (event: React.DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-  };
-
-  const handleHouseholdDragStart = (
-    event: React.DragEvent<HTMLDivElement>,
-    householdId: string
-  ) => {
-    event.dataTransfer.setData('text/plain', householdId);
-  };
+  useEffect(() => {
+    if (
+      showAddParticipantModal &&
+      !newMemberHouseholdId &&
+      sortedParticipants.length > 0
+    ) {
+      setNewMemberHouseholdId(sortedParticipants[0].householdId);
+    }
+  }, [showAddParticipantModal, newMemberHouseholdId, sortedParticipants]);
 
   const toggleReceiptHousehold = useCallback(
     (receiptId: string, householdId: string) => {
@@ -898,14 +738,14 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
     []
   );
 
-  const togglePhotoHousehold = useCallback(
-    (photoId: string, householdId: string) => {
+  const togglePhotoMember = useCallback(
+    (photoId: string, memberId: string) => {
       setPhotoAssignments(prev => {
         const current = prev[photoId] ?? [];
-        const exists = current.includes(householdId);
+        const exists = current.includes(memberId);
         const nextSelections = exists
-          ? current.filter(id => id !== householdId)
-          : [...current, householdId];
+          ? current.filter(id => id !== memberId)
+          : [...current, memberId];
         const next = { ...prev };
         if (nextSelections.length > 0) {
           next[photoId] = nextSelections;
@@ -1084,6 +924,40 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
     } catch (error) {
       console.error('Failed to download photo:', error);
       alert('下载失败，请稍后再试。');
+    }
+  };
+
+  const handleDeletePhoto = async (photo: Photo) => {
+    if (!confirm(t('trip.photos.deleteConfirm'))) {
+      return;
+    }
+
+    setDeletingPhotoId(photo.id);
+    try {
+      const res = await fetch(`/api/trips/${tripId}/photos/${photo.id}`, {
+        method: 'DELETE',
+      });
+
+      if (!res.ok) {
+        const error = await res.json().catch(() => ({}));
+        throw new Error(error.error || 'Failed to delete photo');
+      }
+
+      setSelectedPhotos(prev => {
+        const next = new Set(prev);
+        next.delete(photo.id);
+        return next;
+      });
+
+      if (activePhoto && activePhoto.id === photo.id) {
+        setActivePhoto(null);
+      }
+
+      await fetchPhotos(tripId);
+    } catch (error: any) {
+      setUploadError(error.message || 'Failed to delete photo');
+    } finally {
+      setDeletingPhotoId(null);
     }
   };
 
@@ -2101,12 +1975,23 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                               {new Date(photo.createdAt).toLocaleString()}
                             </p>
                           </div>
-                          <button
-                            onClick={() => handleDownloadSinglePhoto(photo)}
-                            className="text-xs text-blue-600 hover:text-blue-700"
-                          >
-                            {t('trip.photos.downloadSingle')}
-                          </button>
+                          <div className="flex gap-2 text-xs">
+                            <button
+                              onClick={() => handleDownloadSinglePhoto(photo)}
+                              className="text-blue-600 hover:text-blue-700"
+                            >
+                              {t('trip.photos.downloadSingle')}
+                            </button>
+                            <button
+                              onClick={() => handleDeletePhoto(photo)}
+                              disabled={deletingPhotoId === photo.id}
+                              className="text-red-500 hover:text-red-600 disabled:opacity-50"
+                            >
+                              {deletingPhotoId === photo.id
+                                ? t('trip.photos.deleting')
+                                : t('trip.photos.delete')}
+                            </button>
+                          </div>
                         </div>
                         <div className="flex flex-wrap gap-2 text-xs">
                           {photo.tags && photo.tags.length > 0 ? (
@@ -2124,24 +2009,22 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                         </div>
                         <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 dark:border-gray-700 dark:bg-gray-900/50">
                           <p className="text-xs font-semibold uppercase tracking-wide text-gray-600 dark:text-gray-400">
-                            {t('trip.photos.householdTitle')}
+                            {t('trip.photos.peopleTitle')}
                           </p>
                           <p className="mt-1 text-xs text-gray-600 dark:text-gray-400">
-                            {t('trip.photos.householdHint')}
+                            {t('trip.photos.peopleHint')}
                           </p>
-                          {sortedParticipants.length === 0 ? (
+                          {sortedMembers.length === 0 ? (
                             <p className="mt-2 text-xs text-gray-500 dark:text-gray-400">
-                              {t('trip.photos.householdEmpty')}
+                              {t('trip.photos.peopleEmpty')}
                             </p>
                           ) : (
                             <div className="mt-2 max-h-28 space-y-1 overflow-y-auto pr-1">
-                              {sortedParticipants.map(participant => {
-                                const isTagged = (photoAssignments[photo.id] ?? []).includes(
-                                  participant.householdId
-                                );
+                              {sortedMembers.map(member => {
+                                const isTagged = (photoAssignments[photo.id] ?? []).includes(member.id);
                                 return (
                                   <label
-                                    key={`${photo.id}-household-${participant.householdId}`}
+                                    key={`${photo.id}-member-${member.id}`}
                                     className="flex items-center gap-2 rounded-md px-2 py-1 text-xs text-gray-700 transition hover:bg-white dark:text-gray-200 dark:hover:bg-gray-800"
                                     onClick={event => event.stopPropagation()}
                                   >
@@ -2150,12 +2033,15 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                                       checked={isTagged}
                                       onChange={event => {
                                         event.stopPropagation();
-                                        togglePhotoHousehold(photo.id, participant.householdId);
+                                        togglePhotoMember(photo.id, member.id);
                                       }}
                                       className="h-3.5 w-3.5 accent-blue-600"
                                     />
                                     <span className="flex-1">
-                                      {participant.household.displayName}
+                                      {member.name}
+                                      <span className="ml-1 text-[10px] text-gray-400 dark:text-gray-500">
+                                        {member.householdName}
+                                      </span>
                                     </span>
                                   </label>
                                 );
@@ -2229,6 +2115,15 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                     className="w-full rounded-lg bg-blue-600 py-2 text-white hover:bg-blue-700"
                   >
                     {t('trip.photos.downloadOriginal')}
+                  </button>
+                  <button
+                    onClick={() => handleDeletePhoto(activePhoto)}
+                    disabled={deletingPhotoId === activePhoto.id}
+                    className="w-full rounded-lg border border-red-200 py-2 text-red-600 transition hover:bg-red-50 disabled:opacity-50 dark:border-red-400/50 dark:text-red-300 dark:hover:bg-red-900/20"
+                  >
+                    {deletingPhotoId === activePhoto.id
+                      ? t('trip.photos.deleting')
+                      : t('trip.photos.delete')}
                   </button>
                 </div>
                 <div className="space-y-5">
@@ -2350,26 +2245,22 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
               </div>
               <div className="flex flex-wrap gap-2">
                 <button
-                  onClick={handleCreateGroup}
-                  className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
-                >
-                  {t('trip.participants.newGroup')}
-                </button>
-                <button
                   onClick={() => {
                     setShowAddParticipantModal(true);
-                    fetchAvailableHouseholds();
                     setParticipantError('');
-                    setAddParticipantMode('existing');
+                    setAddParticipantMode('member');
+                    setNewMemberName('');
+                    setNewMemberEmail('');
+                    setNewMemberWeight(1);
+                    setNewMemberHouseholdId(participants[0]?.householdId ?? '');
                     setInviteEmail('');
                     setInviteName('');
                     setInviteWeight(1);
-                    setSelectedHousehold('');
-                    setParticipantWeight(1.0);
                   }}
-                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
+                  disabled={participants.length === 0}
+                  className="rounded-lg bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  {t('trip.participants.addParticipant')}
+                  {t('trip.participants.addMember')}
                 </button>
               </div>
             </div>
@@ -2380,105 +2271,71 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
               </div>
             ) : (
               <div className="space-y-5">
-                {groups.map((group) => (
+                {sortedParticipants.map(participant => (
                   <div
-                    key={group.id}
+                    key={participant.id}
                     className="rounded-2xl border border-gray-200 bg-white shadow dark:border-gray-700 dark:bg-gray-800"
                   >
                     <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 px-4 py-3 dark:border-gray-700">
                       <div>
                         <h3 className="text-lg font-semibold text-gray-900 dark:text-white">
-                          {group.name}
+                          {participant.household.displayName}
                         </h3>
                         <p className="text-xs text-gray-500 dark:text-gray-400">
-                          {t('trip.participants.householdCount', {
-                            count: group.householdIds.length,
+                          {t('trip.participants.memberCount', {
+                            count: participant.household.members.length,
                           })}
                         </p>
                       </div>
-                      {group.id !== 'group-ungrouped' && (
-                        <div className="flex gap-2 text-sm">
-                          <button
-                            onClick={() => handleRenameGroup(group.id)}
-                            className="rounded-lg border border-gray-300 px-3 py-1 text-gray-600 hover:bg-gray-100"
-                          >
-                            {t('trip.participants.rename')}
-                          </button>
-                          <button
-                            onClick={() => handleDeleteGroup(group.id)}
-                            className="rounded-lg border border-red-200 px-3 py-1 text-red-500 hover:bg-red-50"
-                          >
-                            {t('trip.participants.delete')}
-                          </button>
-                        </div>
-                      )}
+                      <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm">
+                        <span className="rounded-full bg-blue-50 px-3 py-1 font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-200">
+                          {t('trip.participants.totalWeight', {
+                            weight: participant.weight.toFixed(2),
+                          })}
+                        </span>
+                        <button
+                          onClick={() => handleRemoveParticipant(participant.id)}
+                          className="rounded-lg border border-red-200 px-3 py-1 text-red-500 transition hover:bg-red-50 dark:border-red-400/40 dark:hover:bg-red-900/20"
+                        >
+                          {t('trip.participants.removeHousehold')}
+                        </button>
+                      </div>
                     </div>
-                    <div
-                      className="flex flex-wrap gap-3 px-4 py-4 min-h-[120px]"
-                      onDragOver={handleGroupDragOver}
-                      onDrop={(event) => {
-                        event.preventDefault();
-                        const householdId = event.dataTransfer.getData('text/plain');
-                        if (householdId) {
-                          handleHouseholdDrop(group.id, householdId);
-                        }
-                      }}
-                    >
-                      {group.householdIds.length === 0 ? (
-                        <p className="text-sm text-gray-400">
-                          {t('trip.participants.dragHere')}
+                    <div className="px-4 py-4">
+                      {participant.household.members.length === 0 ? (
+                        <p className="text-sm text-gray-500 dark:text-gray-400">
+                          {t('trip.participants.waitingMembers')}
                         </p>
                       ) : (
-                        group.householdIds.map((householdId) => {
-                          const participant = householdMap.get(householdId);
-                          if (!participant) return null;
-                          return (
+                        <div className="grid gap-3 md:grid-cols-2">
+                          {participant.household.members.map(member => (
                             <div
-                              key={participant.id}
-                              draggable
-                              onDragStart={(event) =>
-                                handleHouseholdDragStart(event, participant.householdId)
-                              }
-                              className="w-full max-w-xs cursor-grab rounded-xl border border-gray-200 bg-white p-4 shadow-sm transition hover:shadow-md dark:border-gray-700 dark:bg-gray-900"
+                              key={member.id}
+                              className="rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm shadow-sm dark:border-gray-700 dark:bg-gray-900/40"
                             >
-                              <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-start justify-between gap-3">
                                 <div>
-                                  <p className="text-sm font-semibold text-gray-900 dark:text-white">
-                                    {participant.household.displayName}
+                                  <p className="font-semibold text-gray-900 dark:text-white">
+                                    {member.user.name || member.user.email}
                                   </p>
                                   <p className="text-xs text-gray-500 dark:text-gray-400">
-                                    {t('trip.participants.weight', {
-                                      weight: participant.weight.toFixed(1),
-                                    })}
+                                    {member.user.email}
                                   </p>
                                 </div>
-                                <button
-                                  onClick={() => handleRemoveParticipant(participant.id)}
-                                  className="text-xs text-red-500 hover:text-red-700"
-                                >
-                                  {t('trip.participants.remove')}
-                                </button>
+                                <span className="rounded-full bg-white px-2 py-0.5 text-xs font-medium text-gray-600 shadow-sm dark:bg-gray-800/80 dark:text-gray-200">
+                                  {t('trip.participants.memberWeight', {
+                                    weight: (member.weight ?? 1).toFixed(2),
+                                  })}
+                                </span>
                               </div>
-                              <div className="mt-3 flex -space-x-2">
-                                {participant.household.members.length > 0 ? (
-                                  participant.household.members.map((member) => (
-                                    <div
-                                      key={member.id}
-                                      className="flex h-8 w-8 items-center justify-center rounded-full border border-white bg-blue-100 text-xs font-medium text-blue-700 dark:border-gray-900 dark:bg-blue-900 dark:text-blue-100"
-                                      title={member.user.email}
-                                    >
-                                      {(member.user.name || member.user.email)[0]?.toUpperCase()}
-                                    </div>
-                                  ))
-                                ) : (
-                                  <span className="text-xs text-gray-400">
-                                    {t('trip.participants.waitingMembers')}
-                                  </span>
-                                )}
-                              </div>
+                              <p className="mt-2 text-xs uppercase tracking-wide text-gray-400 dark:text-gray-500">
+                                {member.role === 'OWNER'
+                                  ? t('trip.participants.ownerRole')
+                                  : t('trip.participants.memberRole')}
+                              </p>
                             </div>
-                          );
-                        })
+                          ))}
+                        </div>
                       )}
                     </div>
                   </div>
@@ -2566,14 +2423,14 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
             <div className="mb-4 flex gap-2">
               <button
                 type="button"
-                onClick={() => setAddParticipantMode('existing')}
+                onClick={() => setAddParticipantMode('member')}
                 className={`flex-1 rounded-lg px-4 py-2 text-sm font-medium ${
-                  addParticipantMode === 'existing'
+                  addParticipantMode === 'member'
                     ? 'bg-blue-600 text-white'
                     : 'border border-gray-300 text-gray-600 hover:bg-gray-100'
                 }`}
               >
-                {t('trip.participants.assignExisting')}
+                {t('trip.participants.addMemberTab')}
               </button>
               <button
                 type="button"
@@ -2594,22 +2451,48 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
               </div>
             )}
 
-            {addParticipantMode === 'existing' ? (
-              <form onSubmit={handleAddParticipant} className="space-y-4">
+            {addParticipantMode === 'member' ? (
+              <form onSubmit={handleCreateMember} className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    {t('trip.participants.selectHousehold')}
+                    {t('trip.participants.memberName')}
+                  </label>
+                  <input
+                    type="text"
+                    value={newMemberName}
+                    onChange={(e) => setNewMemberName(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    {t('trip.participants.memberEmail')}
+                  </label>
+                  <input
+                    type="email"
+                    value={newMemberEmail}
+                    onChange={(e) => setNewMemberEmail(e.target.value)}
+                    required
+                    className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                    {t('trip.participants.memberHousehold')}
                   </label>
                   <select
-                    value={selectedHousehold}
-                    onChange={(e) => setSelectedHousehold(e.target.value)}
+                    value={newMemberHouseholdId}
+                    onChange={(e) => setNewMemberHouseholdId(e.target.value)}
                     required
                     className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
                   >
                     <option value="">{t('trip.participants.chooseHousehold')}</option>
-                    {availableHouseholds.map((household) => (
-                      <option key={household.id} value={household.id}>
-                        {household.displayName}
+                    {sortedParticipants.map(participant => (
+                      <option key={participant.householdId} value={participant.householdId}>
+                        {participant.household.displayName}
                       </option>
                     ))}
                   </select>
@@ -2617,18 +2500,24 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
 
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
-                    {t('trip.participants.weightHint')}
+                    {t('trip.participants.memberWeightLabel')}
                   </label>
                   <input
                     type="number"
                     step="0.1"
                     min="0"
-                    max="2"
-                    value={participantWeight}
-                    onChange={(e) => setParticipantWeight(parseFloat(e.target.value))}
+                    max="10"
+                    value={newMemberWeight}
+                    onChange={(e) => {
+                      const value = parseFloat(e.target.value);
+                      setNewMemberWeight(Number.isNaN(value) ? 1 : value);
+                    }}
                     required
                     className="w-full px-4 py-2 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white"
                   />
+                  <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    {t('trip.participants.memberWeightHint')}
+                  </p>
                 </div>
 
                 <div className="flex gap-3 pt-2">
@@ -2644,7 +2533,7 @@ export default function TripDetailPage({ params }: { params: Promise<{ tripId: s
                     disabled={addingParticipant}
                     className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
                   >
-                    {addingParticipant ? t('trip.participants.assigning') : t('trip.participants.assign')}
+                    {addingParticipant ? t('trip.participants.savingMember') : t('trip.participants.addMemberAction')}
                   </button>
                 </div>
               </form>

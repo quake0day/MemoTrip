@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { readFile as fsReadFile } from 'fs/promises';
 import path from 'path';
+import sharp from 'sharp';
 import { resolveRelativeStoragePath } from '@/lib/storage';
 
 export async function GET(
@@ -34,10 +35,23 @@ export async function GET(
       '.pdf': 'application/pdf',
     };
 
-    const contentType = contentTypes[ext] || 'application/octet-stream';
+    const heifExtensions = new Set(['.heic', '.heif', '.heics']);
+    const rawExtensions = new Set(['.dng', '.nef', '.cr2', '.cr3', '.arw', '.raf', '.rw2', '.orf']);
+
+    let contentType = contentTypes[ext] || 'application/octet-stream';
+    let bufferToServe = fileBuffer;
+
+    if (heifExtensions.has(ext) || rawExtensions.has(ext)) {
+      try {
+        bufferToServe = await sharp(fileBuffer).toFormat('jpeg').toBuffer();
+        contentType = 'image/jpeg';
+      } catch (conversionError) {
+        console.warn('Failed to convert image for browser compatibility:', conversionError);
+      }
+    }
 
     // Convert Buffer to Uint8Array for NextResponse
-    const uint8Array = new Uint8Array(fileBuffer);
+    const uint8Array = new Uint8Array(bufferToServe);
 
     return new NextResponse(uint8Array, {
       headers: {
