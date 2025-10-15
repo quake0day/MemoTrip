@@ -3,9 +3,11 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { useI18n } from '../providers';
 
 export default function RegisterPage() {
   const router = useRouter();
+  const { t } = useI18n();
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -18,12 +20,12 @@ export default function RegisterPage() {
     setError('');
 
     if (password !== confirmPassword) {
-      setError('Passwords do not match');
+      setError(t('register.passwordMismatch'));
       return;
     }
 
     if (password.length < 6) {
-      setError('Password must be at least 6 characters');
+      setError(t('register.passwordTooShort'));
       return;
     }
 
@@ -39,14 +41,14 @@ export default function RegisterPage() {
       const data = await response.json();
 
       if (!response.ok) {
-        throw new Error(data.error || 'Registration failed');
+        throw new Error(data.error || t('register.errorGeneric'));
       }
 
       // Store user data and redirect
       localStorage.setItem('user', JSON.stringify(data.user));
       router.push('/dashboard');
     } catch (err: any) {
-      setError(err.message);
+      setError(err?.message || t('register.errorGeneric'));
     } finally {
       setLoading(false);
     }
@@ -58,10 +60,10 @@ export default function RegisterPage() {
         <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl p-8">
           <div className="text-center mb-8">
             <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">
-              Create Account
+              {t('register.title')}
             </h1>
             <p className="text-gray-600 dark:text-gray-400">
-              Join MemoTrip to start tracking expenses
+              {t('register.subtitle')}
             </p>
           </div>
 
@@ -71,7 +73,7 @@ export default function RegisterPage() {
                 htmlFor="name"
                 className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
               >
-                Full Name
+                {t('register.nameLabel')}
               </label>
               <input
                 id="name"
@@ -80,7 +82,7 @@ export default function RegisterPage() {
                 onChange={(e) => setName(e.target.value)}
                 required
                 className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-                placeholder="John Doe"
+                placeholder={t('register.namePlaceholder')}
               />
             </div>
 
@@ -89,7 +91,7 @@ export default function RegisterPage() {
                 htmlFor="email"
                 className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
               >
-                Email
+                {t('register.emailLabel')}
               </label>
               <input
                 id="email"
@@ -98,7 +100,7 @@ export default function RegisterPage() {
                 onChange={(e) => setEmail(e.target.value)}
                 required
                 className="w-full px-4 py-3 rounded-lg border border-gray-300 focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:border-gray-600 dark:text-white"
-                placeholder="you@example.com"
+                placeholder={t('register.emailPlaceholder')}
               />
             </div>
 
@@ -107,7 +109,7 @@ export default function RegisterPage() {
                 htmlFor="password"
                 className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
               >
-                Password
+                {t('register.passwordLabel')}
               </label>
               <input
                 id="password"
@@ -125,7 +127,7 @@ export default function RegisterPage() {
                 htmlFor="confirmPassword"
                 className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2"
               >
-                Confirm Password
+                {t('register.confirmPasswordLabel')}
               </label>
               <input
                 id="confirmPassword"
@@ -149,26 +151,26 @@ export default function RegisterPage() {
               disabled={loading}
               className="w-full bg-blue-600 text-white py-3 rounded-lg font-medium hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >
-              {loading ? 'Creating account...' : 'Sign Up'}
+              {loading ? t('register.submitLoading') : t('register.submitIdle')}
             </button>
           </form>
 
           <div className="mt-6 text-center text-sm">
             <span className="text-gray-600 dark:text-gray-400">
-              Already have an account?{' '}
+              {t('register.haveAccount')}{' '}
             </span>
             <Link
               href="/login"
               className="text-blue-600 hover:text-blue-700 font-medium"
             >
-              Sign in
+              {t('register.signIn')}
             </Link>
           </div>
         </div>
 
         <div className="mt-4 text-center text-sm text-gray-600 dark:text-gray-400">
           <Link href="/" className="hover:text-gray-900 dark:hover:text-white">
-            ← Back to home
+            {t('register.back')}
           </Link>
         </div>
       </div>

@@ -29,6 +29,52 @@ export async function POST(request: NextRequest) {
       },
     });
 
+    // Attach user to pending invites for their email
+    const now = new Date();
+    const pendingInvites = await prisma.invite.findMany({
+      where: {
+        email,
+        expiresAt: {
+          gt: now,
+        },
+        used: {
+          lt: prisma.invite.fields.maxUses,
+        },
+      },
+    });
+
+    await Promise.all(
+      pendingInvites.map(async (invite) => {
+        if (invite.householdId) {
+          await prisma.householdMember.upsert({
+            where: {
+              userId_householdId: {
+                userId: user.id,
+                householdId: invite.householdId,
+              },
+            },
+            update: {
+              role: 'OWNER',
+            },
+            create: {
+              userId: user.id,
+              householdId: invite.householdId,
+              role: 'OWNER',
+            },
+          });
+        }
+
+        await prisma.invite.update({
+          where: { id: invite.id },
+          data: {
+            used: {
+              increment: 1,
+            },
+          },
+        });
+      })
+    );
+
     return NextResponse.json({
       user: {
         id: user.id,

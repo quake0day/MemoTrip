@@ -36,6 +36,7 @@ model Household {
 
   members          HouseholdMember[]
   tripParticipants TripParticipant[]
+  invites          Invite[]
 
   @@map("households")
 }
@@ -153,6 +154,7 @@ model Photo {
   width      Int?
   height     Int?
   thumbPath  String?
+  tagsJson   Json?
   createdAt  DateTime @default(now())
 
   trip     Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
@@ -163,19 +165,23 @@ model Photo {
 }
 
 model Invite {
-  id        String   @id @default(cuid())
-  tripId    String
-  code      String   @unique
-  expiresAt DateTime
-  maxUses   Int      @default(1)
-  used      Int      @default(0)
-  createdBy String
-  createdAt DateTime @default(now())
+  id          String    @id @default(cuid())
+  tripId      String
+  code        String    @unique
+  email       String?
+  householdId String?
+  expiresAt   DateTime
+  maxUses     Int       @default(1)
+  used        Int       @default(0)
+  createdBy   String
+  createdAt   DateTime  @default(now())
 
-  trip    Trip @relation(fields: [tripId], references: [id], onDelete: Cascade)
-  creator User @relation(fields: [createdBy], references: [id])
+  trip       Trip       @relation(fields: [tripId], references: [id], onDelete: Cascade)
+  creator    User       @relation(fields: [createdBy], references: [id])
+  household  Household? @relation(fields: [householdId], references: [id], onDelete: SetNull)
 
   @@index([code])
   @@index([tripId])
+  @@index([email])
   @@map("invites")
 }
